@@ -16,9 +16,11 @@ enum CloudLocations {
         return urls.sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
     }
 
+    static let statusKeys: [URLResourceKey] = [.isUbiquitousItemKey, .ubiquitousItemDownloadingStatusKey, .ubiquitousItemIsDownloadingKey, .ubiquitousItemIsUploadingKey, .ubiquitousItemDownloadingErrorKey, .ubiquitousItemUploadingErrorKey]
+
     static func status(_ url: URL) -> String {
         do {
-            let values = try url.resourceValues(forKeys: [.isUbiquitousItemKey, .ubiquitousItemDownloadingStatusKey, .ubiquitousItemIsDownloadingKey, .ubiquitousItemIsUploadingKey, .ubiquitousItemDownloadingErrorKey, .ubiquitousItemUploadingErrorKey])
+            let values = try url.resourceValues(forKeys: Set(statusKeys))
             if values.isUbiquitousItem == true {
                 if let error = values.ubiquitousItemDownloadingError ?? values.ubiquitousItemUploadingError { return "iCloud error: \(error.localizedDescription)" }
                 if values.ubiquitousItemIsDownloading == true { return "Downloading" }

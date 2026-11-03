@@ -50,6 +50,14 @@ struct FolderComparison {
     let right: URL
     let items: [Item]
     let allowCloudDownloads: Bool
+    /// Paths that contain other listed items, and type-conflict paths, computed once instead of per row.
+    let folders: Set<String>
+    let conflicts: Set<String>
+
+    /// Folders with listed contents are synced item by item; anything under a type conflict needs manual resolution.
+    func isSelectable(_ item: Item) -> Bool {
+        item.canCopy && !folders.contains(item.path) && !ancestorPaths(item.path).contains(where: conflicts.contains)
+    }
 
     static func compare(left: URL, right: URL, allowCloudDownloads: Bool = false) throws -> FolderComparison {
         let left = left.standardizedFileURL.resolvingSymlinksInPath()
@@ -67,7 +75,9 @@ struct FolderComparison {
             } else { kind = lhs == nil ? .onlyRight : .onlyLeft }
             return Item(path: path, left: lhs, right: rhs, kind: kind)
         }
-        return FolderComparison(left: left, right: right, items: items, allowCloudDownloads: allowCloudDownloads)
+        return FolderComparison(left: left, right: right, items: items, allowCloudDownloads: allowCloudDownloads,
+                                folders: Set(items.flatMap { ancestorPaths($0.path) }),
+                                conflicts: Set(items.filter { $0.kind == .typeConflict }.map(\.path)))
     }
 
     private static func inventory(_ root: URL, allowCloudDownloads: Bool) throws -> [String: Snapshot] {
@@ -120,7 +130,7 @@ struct FolderComparison {
             }
             guard let source = useLeft ? item.left : item.right else { continue }
             // Parents are created by the operation queue; never implicitly copy unselected descendants.
-            if source.isDirectory && items.contains(where: { $0.path.hasPrefix(item.path + "/") }) { continue }
+            if source.isDirectory && folders.contains(item.path) { continue }
             let destination = (useLeft ? right : left).appendingPathComponent(item.path, isDirectory: source.isDirectory)
             let existing = useLeft ? item.right : item.left
             result.append(Copy(source: source.url, destination: destination, sourceSnapshot: source, destinationSnapshot: existing))

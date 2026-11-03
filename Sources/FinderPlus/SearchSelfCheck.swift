@@ -12,27 +12,9 @@ private func canonicalSearchURLs(_ urls: [URL]) -> [URL] {
     urls.map { $0.resolvingSymlinksInPath().standardizedFileURL }
 }
 
-private final class SearchCheckCompletion: @unchecked Sendable {
-    let semaphore = DispatchSemaphore(value: 0)
-    var result: Result<Void, Error>?
-}
-
 extension NaturalQuery {
     /// Isolated temporary fixtures only; no configured folders, network, downloads or OCR requests.
-    static func selfCheck() throws {
-        let completion = SearchCheckCompletion()
-        Task.detached(priority: .userInitiated) {
-            do {
-                try await fixtureSelfCheck()
-                completion.result = .success(())
-            } catch { completion.result = .failure(error) }
-            completion.semaphore.signal()
-        }
-        completion.semaphore.wait()
-        try completion.result!.get()
-    }
-
-    static func fixtureSelfCheck() async throws {
+    static func selfCheck() async throws {
         let manager = FileManager.default
         let base = manager.temporaryDirectory.resolvingSymlinksInPath().appendingPathComponent("FinderPlus-search-check-\(UUID().uuidString)", isDirectory: true)
         let root = base.appendingPathComponent("Approved", isDirectory: true)

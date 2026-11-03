@@ -39,14 +39,14 @@ struct CompareFoldersView: View {
                             Toggle(isOn: Binding(get: { selected.contains(item.id) }, set: { value in
                                 if value { selected.insert(item.id) } else { selected.remove(item.id) }
                             })) { Text(item.path).lineLimit(2) }
-                            .disabled(!isSelectable(item, in: comparison) || busy)
+                            .disabled(!comparison.isSelectable(item) || busy)
                             Spacer()
                             Text(item.kind.rawValue).foregroundStyle(item.kind == .typeConflict ? Color.red : Color.secondary)
                         }
                     }
                 }
                 HStack {
-                    Button("Select Copyable") { selected = Set(comparison.items.filter { isSelectable($0, in: comparison) }.map(\.id)) }
+                    Button("Select Copyable") { selected = Set(comparison.items.filter { comparison.isSelectable($0) }.map(\.id)) }
                     Button("Clear Selection") { selected.removeAll() }
                     Spacer()
                     Text("\(comparison.items.filter { $0.kind != .equal }.count) differences")
@@ -67,13 +67,13 @@ struct CompareFoldersView: View {
         .sheet(isPresented: $showReview) {
             VStack(alignment: .leading, spacing: 12) {
                 Text("Review \(reviewed.count) Copies").font(.title2)
-                Text("Only these paths will be copied. Existing destinations still require conflict confirmation in the operations queue. Both-way synchronization chooses the newer modification date, not a version history; equal-date conflicts require an explicit direction.")
+                Text("Only these paths will be copied. Existing files are replaced; Undo restores the replaced versions. Both-way synchronization chooses the newer modification date, not a version history; equal-date conflicts require an explicit direction.")
                     .font(.caption)
                 List(reviewed) { copy in
                     VStack(alignment: .leading) {
                         Text(copy.source.path).textSelection(.enabled)
                         Text("→ \(copy.destination.path)").textSelection(.enabled)
-                        Text(copy.destinationSnapshot == nil ? "Create" : "Existing destination — conflict review required").font(.caption).foregroundStyle(.secondary)
+                        Text(copy.destinationSnapshot == nil ? "Create" : "Replaces the existing item (Undo restores it)").font(.caption).foregroundStyle(.secondary)
                     }
                 }
                 HStack {
@@ -83,12 +83,6 @@ struct CompareFoldersView: View {
                 }
             }.padding(20).frame(width: 760, height: 440)
         }
-    }
-
-    private func isSelectable(_ item: FolderComparison.Item, in comparison: FolderComparison) -> Bool {
-        guard item.canCopy else { return false }
-        if (item.left?.isDirectory == true || item.right?.isDirectory == true) && comparison.items.contains(where: { $0.path.hasPrefix(item.path + "/") }) { return false }
-        return !comparison.items.contains { $0.kind == .typeConflict && item.path.hasPrefix($0.path + "/") }
     }
 
     private func compare() {
@@ -106,7 +100,7 @@ struct CompareFoldersView: View {
                 let result = try await task.value
                 guard !task.isCancelled else { busy = false; return }
                 comparison = result
-                selected = Set(result.items.filter { isSelectable($0, in: result) }.map(\.id))
+                selected = Set(result.items.filter { result.isSelectable($0) }.map(\.id))
             } catch { self.error = error.localizedDescription }
             busy = false
         }

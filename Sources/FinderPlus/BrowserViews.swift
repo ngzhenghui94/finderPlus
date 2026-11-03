@@ -224,7 +224,7 @@ struct PaneView: View {
             TableColumn("Name") { item in
                 HStack(spacing: 6) {
                     FileIcon(url: item.url, size: 18); Text(item.name).lineLimit(1); TagDots(tags: item.tags, colors: item.tagColors); cloud(item)
-                    if !pane.query.isEmpty, item.url.deletingLastPathComponent().resolvingSymlinksInPath().standardizedFileURL != pane.url.resolvingSymlinksInPath().standardizedFileURL { Text("in " + item.url.deletingLastPathComponent().lastPathComponent).foregroundStyle(.tertiary).lineLimit(1).help(item.url.deletingLastPathComponent().path) }
+                    if !pane.query.isEmpty, item.url.deletingLastPathComponent().path != kernelPath(pane.url) { Text("in " + item.url.deletingLastPathComponent().lastPathComponent).foregroundStyle(.tertiary).lineLimit(1).help(item.url.deletingLastPathComponent().path) }
                 }
                     .contextMenu { FileContextMenu(workspace: workspace, pane: pane, entry: item) }.onDrag { drag(item) }
             }.width(min: 140, ideal: 250)
@@ -528,28 +528,33 @@ struct FileContextMenu: View {
 
 private let finderPlusFileListType = "com.icelemontees.finderplus.file-list"
 
+/// One action for the whole drop: Finder sends one provider per file, and each must not become its own job and undo step.
 @MainActor func receiveFileDrop(_ providers: [NSItemProvider], action: @escaping @MainActor ([URL]) -> Void) -> Bool {
-    for provider in providers {
-        if provider.hasItemConformingToTypeIdentifier(finderPlusFileListType) {
-            provider.loadDataRepresentation(forTypeIdentifier: finderPlusFileListType) { data, error in
-                Task { @MainActor in
-                    do {
-                        if let error { throw error }
-                        guard let data else { throw CocoaError(.fileReadCorruptFile) }
-                        let urls = try JSONDecoder().decode([URL].self, from: data)
-                        guard !urls.isEmpty, urls.allSatisfy(\.isFileURL) else { throw CocoaError(.fileReadUnsupportedScheme) }
-                        action(urls)
-                    } catch { explain("Cannot read the dragged files: \(error.localizedDescription)") }
-                }
-            }
-        } else {
-            _ = provider.loadObject(ofClass: NSURL.self) { value, error in
-                Task { @MainActor in
-                    if let error { explain(error.localizedDescription) }
-                    else if let url = value as? URL, url.isFileURL { action([url]) }
-                }
-            }
-        }
+    Task {
+        do {
+            var urls: [URL] = []
+            for provider in providers { urls += try await droppedURLs(provider) }
+            if !urls.isEmpty { action(urls) }
+        } catch { explain("Cannot read the dragged files: \(error.localizedDescription)") }
     }
     return !providers.isEmpty
+}
+
+private func droppedURLs(_ provider: NSItemProvider) async throws -> [URL] {
+    if provider.hasItemConformingToTypeIdentifier(finderPlusFileListType) {
+        let data: Data = try await withCheckedThrowingContinuation { done in
+            _ = provider.loadDataRepresentation(forTypeIdentifier: finderPlusFileListType) { data, error in
+                if let data { done.resume(returning: data) } else { done.resume(throwing: error ?? CocoaError(.fileReadCorruptFile)) }
+            }
+        }
+        let urls = try JSONDecoder().decode([URL].self, from: data)
+        guard !urls.isEmpty, urls.allSatisfy(\.isFileURL) else { throw CocoaError(.fileReadUnsupportedScheme) }
+        return urls
+    }
+    return try await withCheckedThrowingContinuation { done in
+        _ = provider.loadObject(ofClass: NSURL.self) { value, error in
+            if let error { done.resume(throwing: error) }
+            else { done.resume(returning: (value as? URL).map { $0.isFileURL ? [$0] : [] } ?? []) }
+        }
+    }
 }

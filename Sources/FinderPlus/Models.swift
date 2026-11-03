@@ -16,8 +16,12 @@ struct FileEntry: Identifiable, Hashable {
     let tagColors: [String: Int]
     let cloudStatus: String
 
+    private static let ownKeys: [URLResourceKey] = [.isDirectoryKey, .isPackageKey, .fileSizeKey, .contentModificationDateKey, .creationDateKey, .localizedTypeDescriptionKey, .tagNamesKey]
+    /// Everything `init` reads; prefetch these when listing so each file is not asked one key at a time.
+    static let resourceKeys = ownKeys + CloudLocations.statusKeys
+
     init(url: URL) throws {
-        let values = try url.resourceValues(forKeys: [.isDirectoryKey, .isPackageKey, .fileSizeKey, .contentModificationDateKey, .creationDateKey, .localizedTypeDescriptionKey, .tagNamesKey])
+        let values = try url.resourceValues(forKeys: Set(Self.ownKeys))
         self.url = url
         name = url.lastPathComponent
         isDirectory = values.isDirectory == true && values.isPackage != true
@@ -238,7 +242,7 @@ struct SavedSearch: Identifiable, Codable {
     /// Lists a folder. An item that vanishes or can't be read between listing and reading is left out
     /// instead of failing the whole folder (Downloads does this whenever a download finishes).
     nonisolated static func listing(_ folder: URL, hidden: Bool) throws -> [FileEntry] {
-        try FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: [.isDirectoryKey, .fileSizeKey, .contentModificationDateKey], options: hidden ? [] : [.skipsHiddenFiles])
+        try FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: FileEntry.resourceKeys, options: hidden ? [] : [.skipsHiddenFiles])
             .compactMap { try Task.checkCancellation(); return try? FileEntry(url: $0) }
     }
     func sorted(_ values: [FileEntry]) -> [FileEntry] {

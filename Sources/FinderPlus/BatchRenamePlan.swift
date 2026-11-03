@@ -61,9 +61,9 @@ struct BatchRenamePlan {
             }
             guard FileManager.default.fileExists(atPath: url.path) else { throw OperationFailure.message("Source is missing: \(url.path)") }
         }
-        let paths = changes.map { $0.url.standardizedFileURL.path }
-        for path in paths {
-            if paths.contains(where: { path.hasPrefix($0 + "/") }) { throw OperationFailure.message("Do not rename a folder and one of its descendants in the same batch.") }
+        let paths = Set(changes.map { $0.url.standardizedFileURL.path })
+        if paths.contains(where: { ancestorPaths($0).contains(where: paths.contains) }) {
+            throw OperationFailure.message("Do not rename a folder and one of its descendants in the same batch.")
         }
     }
 

@@ -7,6 +7,16 @@ enum OperationFailure: LocalizedError {
     var errorDescription: String? { if case .message(let text) = self { return text }; return nil }
 }
 
+/// Every folder above `path`: "/a/b/c" → ["/", "/a", "/a/b"], "a/b" → ["a"]. Checking these against a
+/// Set finds nested items in O(n·depth) instead of comparing every pair.
+func ancestorPaths(_ path: String) -> [String] {
+    path.indices.compactMap { index in
+        guard path[index] == "/" else { return nil }
+        let ancestor = index == path.startIndex ? "/" : String(path[..<index])
+        return ancestor == path ? nil : ancestor
+    }
+}
+
 enum ConflictChoice: Sendable { case keepBoth, skip, replace, merge, cancel }
 struct OperationConflict: Sendable {
     let source: URL
@@ -41,6 +51,9 @@ struct OperationMove: Codable, Equatable {
     var trashBookmark: Data? = nil
     var fromParent: String
     var toParent: String
+    /// Every step is a rename, so a metadata fingerprint proves "unchanged" without reading contents.
+    /// nil: an older journal entry fingerprinted with contents.
+    var metadataOnly: Bool? = nil
 }
 struct OperationRecord: Codable, Equatable {
     var id: UUID
@@ -323,9 +336,23 @@ actor OperationsEngine {
         persisted = journal
     }
 
+    /// Undo reaches back this many operations; older records that hold no undo storage and no Trash item
+    /// are dropped so each load and compaction stays small. Undone records are kept so Redo order holds.
+    static let historyLimit = 500
+    static func pruned(_ records: [OperationRecord]) -> [OperationRecord] {
+        let cut = records.count - historyLimit
+        guard cut > 0 else { return records }
+        return records.enumerated().filter { index, record in
+            index >= cut || !["committed", "cancelled", "superseded"].contains(record.state) || !record.artifacts.isEmpty
+                || record.moves.contains { $0.trashBookmark != nil && $0.applied }
+        }.map(\.element)
+    }
+
     /// Folds the log into a fresh snapshot: one full write per operation instead of one per step.
     private func compact() throws {
         guard logStarted else { return }
+        // Prune only when memory matches disk, so a change whose write failed is never published here.
+        if journal == persisted { journal.records = Self.pruned(journal.records); persisted = journal }
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         let data = try encoder.encode(persisted)
@@ -387,15 +414,20 @@ actor OperationsEngine {
     }
 
     // Hash names, contents, links, dates, permissions and extended attributes without following symbolic links.
-    private func signature(_ url: URL, control: OperationControl, includeArtifacts: Bool = false) async throws -> String {
+    // `contents: false` hashes file IDs and sizes instead of bytes and never descends into cloud placeholders:
+    // a rename keeps the file ID, and an edit changes the size, date or ID (atomic saves write a new file).
+    private func signature(_ url: URL, control: OperationControl, includeArtifacts: Bool = false, contents: Bool = true) async throws -> String {
         var hash = SHA256()
         func append(_ text: String) { hash.update(data: Data(text.utf8)); hash.update(data: Data([0])) }
         func walk(_ item: URL, relative: String) async throws {
             try await control.checkpoint()
-            try local(item)
+            if contents { try local(item) }
             let attrs = try fm.attributesOfItem(atPath: item.path)
             let type = try kind(item)
             append(relative); append(type.rawValue)
+            var info = stat()
+            let placeholder = lstat(item.path, &info) == 0 && CloudLocations.isPlaceholder(info)
+            if !contents { append(String(describing: attrs[.systemFileNumber] ?? "")) }
             append(String(describing: attrs[.posixPermissions] ?? ""))
             if type != .typeDirectory { append(String((attrs[.modificationDate] as? Date)?.timeIntervalSinceReferenceDate ?? 0)) }
             if type == .typeSymbolicLink {
@@ -404,8 +436,10 @@ actor OperationsEngine {
                 let entries: [URL]
                 if includeArtifacts {
                     entries = try fm.contentsOfDirectory(at: item, includingPropertiesForKeys: nil).sorted { $0.lastPathComponent < $1.lastPathComponent }
-                } else { entries = try children(item) }
+                } else { entries = contents || !placeholder ? try children(item) : [] }
                 for child in entries { try await walk(child, relative: relative + "/" + child.lastPathComponent) }
+            } else if type == .typeRegular && !contents {
+                append(String(describing: attrs[.size] ?? ""))
             } else if type == .typeRegular {
                 let input = try FileHandle(forReadingFrom: item)
                 append(String(describing: attrs[.size] ?? ""))
@@ -509,7 +543,7 @@ actor OperationsEngine {
         }
         guard exists(source), !exists(destination) else { throw OperationFailure.message("Refusing to overwrite or recover changed paths: \(source.path) → \(destination.path)") }
         if !fingerprinted {
-            guard try await signature(source, control: control) == step.signature else { throw OperationFailure.message("File changed since this operation; refusing to overwrite it: \(source.path)") }
+            guard try await signature(source, control: control, contents: step.metadataOnly != true) == step.signature else { throw OperationFailure.message("File changed since this operation; refusing to overwrite it: \(source.path)") }
         }
         for entry in journal.storage ?? [] where entry.signature != nil && entry.trashedAt == nil {
             if source.path.hasPrefix(entry.path + "/") || destination.path.hasPrefix(entry.path + "/") {
@@ -535,15 +569,13 @@ actor OperationsEngine {
         try persist()
     }
 
-    /// `known`: a fingerprint of `source` the caller just verified, so the item is not read again.
-    private func move(_ source: URL, _ destination: URL, record: Int, control: OperationControl, trash: Bool = false, known: String? = nil) async throws {
-        try local(source)
+    private func move(_ source: URL, _ destination: URL, record: Int, control: OperationControl, trash: Bool = false) async throws {
         if try kind(source) == .typeDirectory {
             let retained = journal.records.flatMap(\.artifacts).contains { $0.hasPrefix(source.path + "/") && exists(URL(fileURLWithPath: $0)) }
             guard !retained else { throw OperationFailure.message("This folder contains retained FinderPlus undo storage. Move its contents instead, or leave the folder in place while this undo history is needed: \(source.path)") }
         }
-        let fingerprint = if let known { known } else { try await signature(source, control: control) }
-        var step = OperationMove(from: source.path, to: destination.path, signature: fingerprint, fromParent: try parentIdentity(source), toParent: try parentIdentity(destination))
+        let fingerprint = try await signature(source, control: control, contents: false)
+        var step = OperationMove(from: source.path, to: destination.path, signature: fingerprint, fromParent: try parentIdentity(source), toParent: try parentIdentity(destination), metadataOnly: true)
         if trash { step.trashBookmark = try source.bookmarkData(options: .minimalBookmark, includingResourceValuesForKeys: nil, relativeTo: nil) }
         journal.records[record].moves.append(step)
         try persist()
@@ -580,7 +612,6 @@ actor OperationsEngine {
 
     private func transfer(_ source: URL, _ requested: URL, moving: Bool, record: Int, control: OperationControl, review: Review, progress: Progress, sourceStorage: URL? = nil) async throws {
         try await control.checkpoint()
-        try local(source)
         let canonicalSource = source.resolvingSymlinksInPath().standardizedFileURL.path
         let canonicalDestination = requested.deletingLastPathComponent().resolvingSymlinksInPath().appendingPathComponent(requested.lastPathComponent).standardizedFileURL.path
         guard canonicalSource != canonicalDestination, !canonicalDestination.hasPrefix(canonicalSource + "/") else { throw OperationFailure.message("An item cannot be copied or moved into itself: \(source.path)") }
@@ -613,6 +644,7 @@ actor OperationsEngine {
             try await move(source, destination, record: record, control: control)
             return
         }
+        try local(source) // a rename never reads the item; a copy does
         let before = try await signature(source, control: control)
         let staged = try stage(in: destination.deletingLastPathComponent(), record: record)
         try await copyTree(source, staged, control: control, progress: progress)
@@ -628,18 +660,18 @@ actor OperationsEngine {
                 throw OperationFailure.message("Destination changed after conflict review. No replacement was made; retry to review it again.")
             }
             let held = try stage(in: destination.deletingLastPathComponent(), record: record)
-            try await move(destination, held, record: record, control: control, known: approvedDestination)
+            try await move(destination, held, record: record, control: control)
         }
-        try await move(staged, destination, record: record, control: control, known: before)
+        try await move(staged, destination, record: record, control: control)
         if moving {
             guard try await signature(source, control: control) == before else { throw OperationFailure.message("Source changed after copying; original retained.") }
             // Between disks the original goes to the Trash, so emptying it frees the space; Undo restores it from there.
             // Volumes without a Trash (network shares) keep it in hidden undo storage as before.
             if (try? fm.url(for: .trashDirectory, in: .userDomainMask, appropriateFor: source, create: true)) != nil {
-                try await move(source, URL(fileURLWithPath: "/.FinderPlus-trash-" + UUID().uuidString), record: record, control: control, trash: true, known: before)
+                try await move(source, URL(fileURLWithPath: "/.FinderPlus-trash-" + UUID().uuidString), record: record, control: control, trash: true)
             } else {
                 let held = try stage(in: sourceStorage ?? source.deletingLastPathComponent(), record: record)
-                try await move(source, held, record: record, control: control, known: before)
+                try await move(source, held, record: record, control: control)
             }
         }
     }
@@ -860,9 +892,10 @@ actor OperationsEngine {
             step.toParent = try parentIdentity(resolved)
         }
         let destination = URL(fileURLWithPath: forward ? step.to : step.from)
-        if exists(source), !exists(destination), try await signature(source, control: control) == step.signature {
+        let contents = step.metadataOnly != true
+        if exists(source), !exists(destination), try await signature(source, control: control, contents: contents) == step.signature {
             step.applied = !forward
-        } else if !exists(source), exists(destination), try await signature(destination, control: control) == step.signature {
+        } else if !exists(source), exists(destination), try await signature(destination, control: control, contents: contents) == step.signature {
             step.applied = forward
             try storageMoved(from: source, to: destination)
         } else { throw OperationFailure.message("Interrupted step has changed or ambiguous files. No recovery changes were made to this step.") }
@@ -977,12 +1010,13 @@ actor OperationsEngine {
             case .rename(let changes):
                 var sources = Set<String>()
                 var destinations = Set<String>()
+                let all = Set(changes.map { $0.0.path })
                 for (source, name) in changes {
                     guard sources.insert(source.standardizedFileURL.path).inserted,
-                          !changes.contains(where: { $0.0.path != source.path && source.path.hasPrefix($0.0.path + "/") }) else {
+                          !ancestorPaths(source.path).contains(where: all.contains) else {
                         throw OperationFailure.message("A batch rename cannot include duplicate sources or both a folder and its descendants.")
                     }
-                    try Self.validName(name); try local(source)
+                    try Self.validName(name)
                     let destination = source.deletingLastPathComponent().appendingPathComponent(name)
                     guard destinations.insert(destination.path.lowercased()).inserted else { throw OperationFailure.message("Two renames have the same destination.") }
                     guard source.path == destination.path || !exists(destination) else { throw OperationFailure.message("Rename destination already exists: \(destination.path). Rename cycles and case-only renames are not supported.") }
@@ -1001,7 +1035,7 @@ actor OperationsEngine {
                         $0.trashBookmark != nil && $0.applied && URL(fileURLWithPath: $0.to).standardizedFileURL.path == url.standardizedFileURL.path
                     }) else { throw OperationFailure.message("No FinderPlus Trash record exists for \(url.path). Use Finder’s Put Back for items trashed by another app.") }
                     let original = URL(fileURLWithPath: step.from)
-                    guard !exists(original), try await signature(url, control: control) == step.signature,
+                    guard !exists(original), try await signature(url, control: control, contents: step.metadataOnly != true) == step.signature,
                           try parentIdentity(original) == step.fromParent else {
                         throw OperationFailure.message("The original location is occupied or changed, or the Trash item changed: \(url.path)")
                     }
@@ -1040,7 +1074,10 @@ actor OperationsEngine {
                 for item in copies {
                     try item.validate()
                     try await ensureParent(item.destination.deletingLastPathComponent(), record: record, control: control)
-                    try await transfer(item.source, item.destination, moving: false, record: record, control: control, review: review, progress: progress)
+                    // validate() just proved this is the destination the user reviewed, so replace it (kept for Undo)
+                    // instead of asking again per file; folders that could merge still ask.
+                    try await transfer(item.source, item.destination, moving: false, record: record, control: control,
+                                       review: { conflict in conflict.canMerge ? await review(conflict) : .replace }, progress: progress)
                 }
             case .undo, .redo, .recover, .abandon, .clearHistory: break
             }

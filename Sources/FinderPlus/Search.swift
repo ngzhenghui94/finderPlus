@@ -50,7 +50,7 @@ struct SearchPlan {
     fileprivate var predicate: SearchPredicate = .all([])
 
     func matches(_ entry: FileEntry) -> Bool {
-        SearchMatcher(plan: self, contentEnabled: false, ocrEnabled: false).matches(SearchRecord(entry: entry))
+        SearchMatcher(plan: self, contentEnabled: false, ocrEnabled: false, roots: []).matches(SearchRecord(entry: entry))
     }
 }
 
@@ -422,12 +422,14 @@ private final class SearchMatcher {
     let plan: SearchPlan
     let contentEnabled: Bool
     let ocrEnabled: Bool
+    /// Approved roots; contents are read only from files still inside them.
+    let roots: [URL]
     var issues: [String] = []
     private var activeText: String?
     private var textLoaded = false
 
-    init(plan: SearchPlan, contentEnabled: Bool, ocrEnabled: Bool) {
-        self.plan = plan; self.contentEnabled = contentEnabled; self.ocrEnabled = ocrEnabled
+    init(plan: SearchPlan, contentEnabled: Bool, ocrEnabled: Bool, roots: [URL]) {
+        self.plan = plan; self.contentEnabled = contentEnabled; self.ocrEnabled = ocrEnabled; self.roots = roots
     }
 
     func matches(_ record: SearchRecord) -> Bool {
@@ -508,7 +510,13 @@ private final class SearchMatcher {
         let url = record.entry.url
         let ext = url.pathExtension.lowercased()
         let type = UTType(filenameExtension: ext)
-        let fileSize = Int64(try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0)
+        let isText = type?.conforms(to: .text) == true || ["md", "csv", "log", "json", "yaml", "yml", "swift", "js", "ts", "py", "sh", "toml", "xml"].contains(ext)
+        guard ext == "pdf" || (contentEnabled && isText) || (ocrEnabled && type?.conforms(to: .image) == true) else { return nil }
+        // Scanned metadata can be up to 10 s old: a folder may since have become a symlink out of scope, or gone online-only.
+        let current = URL(fileURLWithPath: url.path) // a fresh URL, so no cached resource values
+        guard roots.contains(where: { isInside(current.resolvingSymlinksInPath().standardizedFileURL, root: $0) }),
+              isLocallyAvailable(current, values: try? current.resourceValues(forKeys: [.isUbiquitousItemKey, .ubiquitousItemDownloadingStatusKey, .volumeIsLocalKey])) else { return nil }
+        let fileSize = Int64(try current.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0)
         // shortcut: bounded extraction keeps interactive search responsive; use a dedicated indexer for larger documents.
         if (contentEnabled || ocrEnabled) && ext == "pdf" {
             guard fileSize <= 32 * 1024 * 1024 else { note("\(url.lastPathComponent): PDF exceeds the 32 MiB search limit."); return nil }
@@ -534,7 +542,7 @@ private final class SearchMatcher {
             }
             return text
         }
-        if contentEnabled && (type?.conforms(to: .text) == true || ["md", "csv", "log", "json", "yaml", "yml", "swift", "js", "ts", "py", "sh", "toml", "xml"].contains(ext)) {
+        if contentEnabled && isText {
             guard fileSize <= 8 * 1024 * 1024 else { note("\(url.lastPathComponent): text exceeds the 8 MiB search limit."); return nil }
             let data = try Data(contentsOf: url, options: .mappedIfSafe)
             if let text = String(data: data, encoding: .utf8) { return text }
@@ -633,11 +641,12 @@ actor LocalSearchIndex {
             }
             var scanIssues: [String] = []
             let options: FileManager.DirectoryEnumerationOptions = includeHidden ? [.skipsPackageDescendants] : [.skipsHiddenFiles, .skipsPackageDescendants]
-            guard let enumerator = FileManager.default.enumerator(at: root, includingPropertiesForKeys: keys, options: options, errorHandler: { url, error in
+            guard let enumerator = FileManager.default.enumerator(at: root, includingPropertiesForKeys: keys + FileEntry.resourceKeys, options: options, errorHandler: { url, error in
                 if scanIssues.count < 12 { scanIssues.append("\(url.path): \(error.localizedDescription)") }
                 return true
             }) else { issues.append("Cannot enumerate \(root.path)"); continue }
             var rootRecords: [SearchRecord] = []
+            let scanRoot = URL(fileURLWithPath: kernelPath(root))
             for case let url as URL in enumerator {
                 try Task.checkCancellation()
                 do {
@@ -645,7 +654,7 @@ actor LocalSearchIndex {
                     // The enumerator never follows links. skipDescendants() only after a folder: after a file or link
                     // it can skip the contents of a folder returned just before, silently dropping results.
                     if values.isSymbolicLink == true { continue }
-                    guard isInside(url, root: root) else { if values.isDirectory == true { enumerator.skipDescendants() }; continue }
+                    guard isInside(url, root: scanRoot) else { if values.isDirectory == true { enumerator.skipDescendants() }; continue }
                     let local = isLocallyAvailable(url, values: values)
                     if values.isDirectory == true && !local {
                         enumerator.skipDescendants()
@@ -671,18 +680,12 @@ actor LocalSearchIndex {
             records += rootRecords; issues += scanIssues
         }
         // OCR is costly per image: plain words search names and text/PDF contents, only content: filters run OCR.
-        let matcher = SearchMatcher(plan: plan, contentEnabled: contentEnabled, ocrEnabled: ocrEnabled && plan.predicate.needsContent)
+        let matcher = SearchMatcher(plan: plan, contentEnabled: contentEnabled, ocrEnabled: ocrEnabled && plan.predicate.needsContent, roots: acceptedRoots)
         var entries: [FileEntry] = []
         var seen = Set<String>()
         for record in records {
             try Task.checkCancellation()
-            // Cached metadata may outlive a rename or a symlink replacement.
-            if !acceptedRoots.contains(where: { isInside(record.entry.url, root: $0) }) { continue }
-            var current = record
-            if contentEnabled || ocrEnabled {
-                current.local = isLocallyAvailable(record.entry.url, values: try? record.entry.url.resourceValues(forKeys: [.isUbiquitousItemKey, .ubiquitousItemDownloadingStatusKey, .volumeIsLocalKey]))
-            }
-            if seen.insert(record.entry.id).inserted && matcher.matches(current) { entries.append(record.entry) }
+            if seen.insert(record.entry.id).inserted && matcher.matches(record) { entries.append(record.entry) }
         }
         if (contentEnabled || ocrEnabled) && records.contains(where: { !$0.local }) {
             issues.append("Online-only files were not downloaded or searched for content.")
@@ -702,19 +705,28 @@ actor LocalSearchIndex {
         return try? PropertyListSerialization.propertyList(from: data, format: nil)
     }
 
+}
 
-    private func isInside(_ url: URL, root: URL) -> Bool {
-        let path = url.resolvingSymlinksInPath().standardizedFileURL.path
-        return path == root.path || path.hasPrefix(root.path == "/" ? "/" : root.path + "/")
-    }
+/// The path as the kernel spells it (`/private/var/…`, the form directory enumerators return), unlike
+/// `resolvingSymlinksInPath()`, which strips `/private`.
+func kernelPath(_ url: URL) -> String {
+    guard let resolved = realpath(url.path, nil) else { return url.standardizedFileURL.path }
+    defer { free(resolved) }
+    return String(cString: resolved)
+}
 
-    private func isLocallyAvailable(_ url: URL, values: URLResourceValues?) -> Bool {
-        guard values?.volumeIsLocal == true else { return false }
-        if values?.isUbiquitousItem == true {
-            guard values?.ubiquitousItemDownloadingStatus == .current || values?.ubiquitousItemDownloadingStatus == .downloaded else { return false }
-        }
-        return CloudLocations.isReadableLocally(url)
+/// A plain path check: the scan never follows links, so resolving every result again
+/// (about 47 µs each) would only repeat what the scan guarantees.
+private func isInside(_ url: URL, root: URL) -> Bool {
+    url.path == root.path || url.path.hasPrefix(root.path == "/" ? "/" : root.path + "/")
+}
+
+private func isLocallyAvailable(_ url: URL, values: URLResourceValues?) -> Bool {
+    guard values?.volumeIsLocal == true else { return false }
+    if values?.isUbiquitousItem == true {
+        guard values?.ubiquitousItemDownloadingStatus == .current || values?.ubiquitousItemDownloadingStatus == .downloaded else { return false }
     }
+    return CloudLocations.isReadableLocally(url)
 }
 
 @MainActor

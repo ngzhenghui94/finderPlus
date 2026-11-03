@@ -28,6 +28,9 @@ enum NearbyShare {
 
     static func parameters() -> NWParameters {
         let tcp = NWProtocolTCP.Options(); tcp.connectionTimeout = 10
+        // A peer that sleeps or drops off the network mid-transfer fails the connection in about a minute,
+        // so the pending read throws and the partial file is removed instead of waiting forever.
+        tcp.enableKeepalive = true; tcp.keepaliveIdle = 20; tcp.keepaliveInterval = 10; tcp.keepaliveCount = 4
         return NWParameters(tls: nil, tcp: tcp)
     }
 

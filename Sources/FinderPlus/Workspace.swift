@@ -26,7 +26,7 @@ import UniformTypeIdentifiers
     var hoveredPane: UUID?  // not published: hover must not re-render the window
     var paneUnderPointer: BrowserPane { panes.first { $0.id == hoveredPane } ?? active }
     private var observations: [NSObjectProtocol] = []
-    private var persistTask: Task<Void, Never>?
+    private var sidebarState: [NSObject?] = []
     var active: BrowserPane { panes.first(where: { $0.id == activeID }) ?? panes[0] }
     var other: BrowserPane? { panes.first(where: { $0.id != activeID }) }
     var window: NSWindow?
@@ -53,6 +53,10 @@ import UniformTypeIdentifiers
         observations.append(NotificationCenter.default.addObserver(forName: UserDefaults.didChangeNotification, object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor in
                 guard let self else { return }
+                // Every navigation saves the session and fires this; redraw only when sidebar data changed.
+                let state = ["favorites", "savedSearches", "sidebarGroups", "hiddenLocations", "workspaces"].map { UserDefaults.standard.object(forKey: $0) as? NSObject }
+                guard state != self.sidebarState else { return }
+                self.sidebarState = state
                 self.favorites = Self.decode("favorites") ?? []
                 self.savedSearches = Self.decode("savedSearches") ?? []
                 self.groups = UserDefaults.standard.stringArray(forKey: "sidebarGroups") ?? []

@@ -94,7 +94,7 @@ final class FileOperations: ObservableObject {
 
     func copy(_ urls: [URL], to: URL, move: Bool = false) {
         guard !urls.isEmpty else { return }
-        let normalized = normalize(urls)
+        let normalized = Self.normalize(urls)
         if move && CloudLocations.containsCloudItems(normalized) {
             Task {
                 if await confirm(title: "Move files in cloud storage?", detail: "Moving these \(normalized.count) items to \(to.path) can remove them from their current cloud folder and your other devices. The provider controls synchronization.", action: "Move Files") {
@@ -107,7 +107,7 @@ final class FileOperations: ObservableObject {
     }
     func duplicate(_ urls: [URL]) {
         guard !urls.isEmpty else { return }
-        enqueue(.duplicate(normalize(urls)), title: "Duplicate \(urls.count) items")
+        enqueue(.duplicate(Self.normalize(urls)), title: "Duplicate \(urls.count) items")
     }
     func rename(_ url: URL, to name: String) { batchRename([(url, name)]) }
     func batchRename(_ changes: [(URL, String)]) {
@@ -117,11 +117,11 @@ final class FileOperations: ObservableObject {
     func createFolder(in parent: URL, name: String) { enqueue(.folder(parent, name), title: "Create folder \(name)") }
     func compress(_ urls: [URL], in parent: URL) {
         guard !urls.isEmpty else { return }
-        enqueue(.archive(normalize(urls), parent), title: "Create ZIP archive")
+        enqueue(.archive(Self.normalize(urls), parent), title: "Create ZIP archive")
     }
     func makeAlias(_ urls: [URL], in parent: URL) {
         guard !urls.isEmpty else { return }
-        enqueue(.alias(normalize(urls), parent), title: "Create Finder aliases")
+        enqueue(.alias(Self.normalize(urls), parent), title: "Create Finder aliases")
     }
     func synchronize(_ copies: [(source: URL, destination: URL)]) {
         guard !copies.isEmpty else { return }
@@ -136,13 +136,13 @@ final class FileOperations: ObservableObject {
             let names = urls.prefix(8).map(\.lastPathComponent).joined(separator: "\n")
             let cloudWarning = CloudLocations.containsCloudItems(urls) ? "\n\nThese items are in cloud storage. Trashing them also removes them from the cloud and your other devices." : ""
             if await confirm(title: "Move \(urls.count) items to Trash?", detail: names + (urls.count > 8 ? "\n…" : "") + cloudWarning + "\n\nValidated Undo is available while the items remain in Trash. Emptying Trash makes those items unrecoverable.", action: "Move to Trash") {
-                enqueue(.trash(normalize(urls)), title: "Trash \(urls.count) items")
+                enqueue(.trash(Self.normalize(urls)), title: "Trash \(urls.count) items")
             }
         }
     }
     func putBack(_ urls: [URL]) {
         guard !urls.isEmpty else { return }
-        enqueue(.putBack(normalize(urls)), title: "Put Back \(urls.count) Trash items")
+        enqueue(.putBack(Self.normalize(urls)), title: "Put Back \(urls.count) Trash items")
     }
     func undo() { enqueue(.undo, title: "Undo last operation") }
     func redo() { enqueue(.redo, title: "Redo operation") }
@@ -163,10 +163,11 @@ final class FileOperations: ObservableObject {
         }
     }
 
-    private func normalize(_ urls: [URL]) -> [URL] {
+    /// Unique items, minus those inside another selected folder (moving the folder already moves them).
+    static func normalize(_ urls: [URL]) -> [URL] {
         var seen = Set<String>()
         let unique = urls.map(\.standardizedFileURL).filter { seen.insert($0.path).inserted }
-        return unique.filter { item in !unique.contains { other in other != item && item.path.hasPrefix(other.path + "/") } }
+        return unique.filter { !ancestorPaths($0.path).contains(where: seen.contains) }
     }
 
     private func enqueue(_ request: OperationRequest, title: String) {
@@ -532,6 +533,24 @@ final class FileOperations: ObservableObject {
         try await validationEngine.execute(.abandon(recovery.id), id: UUID(), title: "Keep edited fixture", control: OperationControl(), review: keep, progress: progress)
         let keptStatus = await validationEngine.status()
         try require(keptStatus.2.isEmpty, "explicitly retaining edited data clears recovery blocker")
+        // Renames fingerprint metadata, not contents, yet Undo still refuses to move an edited file.
+        let metadataEngine = OperationsEngine(directory: root.appendingPathComponent("metadata-journal"))
+        let metadataFile = root.appendingPathComponent("metadata-before.txt")
+        try Data("metadata".utf8).write(to: metadataFile)
+        try await metadataEngine.execute(.rename([(metadataFile, "metadata-after.txt")]), id: UUID(), title: "Metadata fixture", control: OperationControl(), review: keep, progress: progress)
+        let metadataRenamed = root.appendingPathComponent("metadata-after.txt")
+        try Data("metadata edited".utf8).write(to: metadataRenamed)
+        var metadataRefused = false
+        do { try await metadataEngine.execute(.undo, id: UUID(), title: "Refuse edited rename", control: OperationControl(), review: keep, progress: progress) }
+        catch { metadataRefused = true }
+        try require(metadataRefused && fm.fileExists(atPath: metadataRenamed.path), "rename undo refuses an edited file")
+        let selection = ["/a", "/a/b", "/ab", "/a b", "/a b/x", "/a"].map { URL(fileURLWithPath: $0) }
+        try require(normalize(selection).map(\.path) == ["/a", "/ab", "/a b"], "selection drops duplicates and nested items")
+        try require(ancestorPaths("/") == [] && ancestorPaths("/a/b") == ["/", "/a"] && ancestorPaths("a/b") == ["a"], "ancestor paths")
+        let history = (0..<(OperationsEngine.historyLimit + 3)).map { OperationRecord(id: UUID(), title: "\($0)", state: "committed") }
+        var withStorage = history; withStorage[0].artifacts = ["/tmp/.FinderPlus-" + UUID().uuidString]
+        let pruned = OperationsEngine.pruned(withStorage)
+        try require(pruned.count == OperationsEngine.historyLimit + 1 && pruned.first?.id == withStorage[0].id && pruned.last?.id == withStorage.last?.id, "history pruning keeps storage records and the newest operations")
         let staleSource = root.appendingPathComponent("stale-source")
         let staleTarget = root.appendingPathComponent("stale-target")
         try Data("before".utf8).write(to: staleSource)
