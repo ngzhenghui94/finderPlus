@@ -77,11 +77,16 @@ struct FolderComparison {
         var items: [String: Snapshot] = [:]
         for case let enumeratedURL as URL in enumerator {
             try Task.checkCancellation()
+            // FinderPlus undo storage is not user data; syncing it would be refused by the operation queue.
+            // skipDescendants only after a folder: after a file it can skip a folder returned just before.
+            if enumeratedURL.lastPathComponent.hasPrefix(".FinderPlus-") {
+                if (try? enumeratedURL.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true { enumerator.skipDescendants() }
+                continue
+            }
             // Normalize the parent, not the item: symlinks must remain symlinks.
             let url = enumeratedURL.deletingLastPathComponent().standardizedFileURL.resolvingSymlinksInPath().appendingPathComponent(enumeratedURL.lastPathComponent)
             guard url.path.hasPrefix(root.path + "/") else { throw OperationFailure.message("An enumerated item escaped the comparison folder.") }
             let snapshot = try Snapshot(url, allowCloudDownloads: allowCloudDownloads)
-            if snapshot.isSymlink { enumerator.skipDescendants() }
             items[String(url.path.dropFirst(root.path.count + 1))] = snapshot
         }
         if let error = enumerationError { throw error }
@@ -147,7 +152,17 @@ struct FolderComparison {
         try Data("same".utf8).write(to: left.appendingPathComponent("same"))
         try Data("same".utf8).write(to: right.appendingPathComponent("same"))
         try Data("new".utf8).write(to: left.appendingPathComponent("nested/new"))
+        try fm.createDirectory(at: left.appendingPathComponent(".FinderPlus-\(UUID().uuidString)"), withIntermediateDirectories: false)
+        try Data("held".utf8).write(to: left.appendingPathComponent(".FinderPlus-\(UUID().uuidString)"))
+        // Links next to a folder must not hide its contents (skipDescendants after a non-folder used to).
+        let linked = base.appendingPathComponent("linked"), empty = base.appendingPathComponent("empty")
+        try fm.createDirectory(at: linked.appendingPathComponent("deep"), withIntermediateDirectories: true)
+        try fm.createDirectory(at: empty, withIntermediateDirectories: true)
+        try Data("needle".utf8).write(to: linked.appendingPathComponent("deep/needle"))
+        for index in 0..<12 { try fm.createSymbolicLink(at: linked.appendingPathComponent("link\(index)"), withDestinationURL: linked.appendingPathComponent("deep")) }
+        guard try compare(left: linked, right: empty).items.contains(where: { $0.path == "deep/needle" }) else { throw OperationFailure.message("Comparison skipped a folder next to symlinks") }
         let comparison = try compare(left: left, right: right)
+        guard !comparison.items.contains(where: { $0.path.hasPrefix(".FinderPlus-") }) else { throw OperationFailure.message("Comparison listed FinderPlus undo storage") }
         guard comparison.items.first(where: { $0.path == "changed" })?.kind == .different,
               comparison.items.first(where: { $0.path == "same" })?.kind == .equal,
               comparison.items.first(where: { $0.path == "nested/new" })?.kind == .onlyLeft else { throw OperationFailure.message("Recursive comparison self-check failed") }

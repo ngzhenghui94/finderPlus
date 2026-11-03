@@ -262,7 +262,7 @@ struct InfoView: View {
                 Button("Save Metadata") { save() }.disabled(entry == nil)
             }
         }.padding(20).frame(width: 660, height: 620).onAppear { load() }
-        .task(id: url) { if entry?.isDirectory == true || (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true { let target = url; folderSize = await Task.detached(priority: .utility) { totalFileSize([target]) }.value } }
+        .task(id: url) { if entry?.isDirectory == true || (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true { let target = url; folderSize = await measuredSize([target]) } }
     }
 
     private func load() {

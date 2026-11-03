@@ -235,11 +235,18 @@ actor OperationsEngine {
     }
 
     private var logURL: URL { Self.logURL(journalURL) }
+    /// Cuts a final line a crash left without its newline, so the next append starts on a fresh line
+    /// instead of extending the broken one into JSON that can never be read.
+    static func trimTornTail(_ url: URL) {
+        guard let data = try? Data(contentsOf: url), let last = data.last, last != 0x0A else { return }
+        _ = truncate(url.path, off_t(data.lastIndex(of: 0x0A).map { $0 + 1 } ?? 0))
+    }
     private static func logURL(_ journal: URL) -> URL { journal.deletingLastPathComponent().appendingPathComponent("operations.log") }
     static func digest(_ data: Data) -> String { SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined() }
 
     private func load() throws {
         (journal, snapshotDigest, logStarted) = try Self.readJournal(journalURL)
+        if logStarted { Self.trimTornTail(logURL) } // load() runs under the operations lock, so no writer is mid-append
         persisted = journal
         ownedArtifactNames = Set(journal.records.flatMap(\.artifacts).map { URL(fileURLWithPath: $0).lastPathComponent })
     }
@@ -414,8 +421,9 @@ actor OperationsEngine {
                 let read = listxattr(item.path, &buffer, length, XATTR_NOFOLLOW)
                 guard read == length else { throw OperationFailure.message("Extended attributes changed while reading \(item.path)") }
                 let names = buffer.split(separator: 0).map { String(decoding: $0.map { UInt8(bitPattern: $0) }, as: UTF8.self) }.sorted()
-                // macOS assigns provenance to new files; copyfile cannot transfer this system-owned attribute.
-                for name in names where name != "com.apple.provenance" {
+                // System-owned security attributes: macOS adds provenance to new files and macl to items it moves
+                // into the Trash (sometimes a moment later), and copyfile cannot transfer either.
+                for name in names where name != "com.apple.provenance" && name != "com.apple.macl" {
                     let size = getxattr(item.path, name, nil, 0, 0, XATTR_NOFOLLOW)
                     guard size >= 0 else { throw OperationFailure.message("Cannot read attribute \(name) on \(item.path)") }
                     var data = Data(count: size)
@@ -625,8 +633,14 @@ actor OperationsEngine {
         try await move(staged, destination, record: record, control: control, known: before)
         if moving {
             guard try await signature(source, control: control) == before else { throw OperationFailure.message("Source changed after copying; original retained.") }
-            let held = try stage(in: sourceStorage ?? source.deletingLastPathComponent(), record: record)
-            try await move(source, held, record: record, control: control, known: before)
+            // Between disks the original goes to the Trash, so emptying it frees the space; Undo restores it from there.
+            // Volumes without a Trash (network shares) keep it in hidden undo storage as before.
+            if (try? fm.url(for: .trashDirectory, in: .userDomainMask, appropriateFor: source, create: true)) != nil {
+                try await move(source, URL(fileURLWithPath: "/.FinderPlus-trash-" + UUID().uuidString), record: record, control: control, trash: true, known: before)
+            } else {
+                let held = try stage(in: sourceStorage ?? source.deletingLastPathComponent(), record: record)
+                try await move(source, held, record: record, control: control, known: before)
+            }
         }
     }
 
@@ -949,7 +963,13 @@ actor OperationsEngine {
             switch request {
             case .transfer(let urls, let destination, let moving):
                 for (index, source) in urls.enumerated() {
-                    try await transfer(source, destination.appendingPathComponent(source.lastPathComponent), moving: moving, record: record, control: control, review: review, progress: progress)
+                    var target = destination.appendingPathComponent(source.lastPathComponent)
+                    // Into its own folder: a copy goes beside it as "name copy" (like Finder); a move has nothing to do.
+                    if destination.resolvingSymlinksInPath().standardizedFileURL.path == source.deletingLastPathComponent().resolvingSymlinksInPath().standardizedFileURL.path {
+                        if moving { continue }
+                        target = unique(target)
+                    }
+                    try await transfer(source, target, moving: moving, record: record, control: control, review: review, progress: progress)
                     await progress(Double(index + 1) / Double(max(1, urls.count)), source.lastPathComponent)
                 }
             case .duplicate(let urls):

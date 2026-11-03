@@ -44,6 +44,12 @@ func totalFileSize(_ urls: [URL]) -> Int64 {
     return total
 }
 
+/// `totalFileSize` off the main thread; cancelling the caller stops the walk.
+func measuredSize(_ urls: [URL]) async -> Int64 {
+    let work = Task.detached(priority: .utility) { totalFileSize(urls) }
+    return await withTaskCancellationHandler { await work.value } onCancel: { work.cancel() }
+}
+
 /// The error text plus a plain-language next step for the failures people actually hit.
 func explainFailure(_ error: Error) -> String {
     let ns = error as NSError
@@ -77,6 +83,7 @@ final class FileOperations: ObservableObject {
     @Published private(set) var globallyPaused = false
     private var failedRequests: [UUID: OperationRequest] = [:]
     private var rateSamples: [UUID: (time: TimeInterval, bytes: Int64)] = [:]
+    private var sizeTasks: [UUID: Task<Void, Never>] = [:]
     private var confirmingHistory = false
 
     private init() {
@@ -180,8 +187,8 @@ final class FileOperations: ObservableObject {
         isBusy = true
         let sources = request.copySources
         if !sources.isEmpty {
-            Task {
-                let total = await Task.detached(priority: .utility) { totalFileSize(sources) }.value
+            sizeTasks[job.id] = Task {
+                let total = await measuredSize(sources)
                 if let index = jobs.firstIndex(where: { $0.id == job.id }) { jobs[index].totalBytes = total }
             }
         }
@@ -204,6 +211,7 @@ final class FileOperations: ObservableObject {
                 if request.isRetryable, let index = jobs.firstIndex(where: { $0.id == job.id }) { failedRequests[job.id] = request; jobs[index].canRetry = true }
             }
             rateSamples[job.id] = nil
+            sizeTasks.removeValue(forKey: job.id)?.cancel()
             if let index = jobs.firstIndex(where: { $0.id == job.id }) {
                 jobs[index].isFinished = true
                 jobs[index].isPaused = false
@@ -439,6 +447,25 @@ final class FileOperations: ObservableObject {
         try require(try heldCopies() == heldBefore, "same-disk move is a rename that keeps no hidden copy")
         try await run(.undo)
         try require(fm.fileExists(atPath: file.path), "move undo restores source")
+        let besideCopy = source.appendingPathComponent("sample copy.txt")
+        try await run(.transfer([file], source, false))
+        try require(try Data(contentsOf: besideCopy) == Data(contentsOf: file), "paste into the same folder makes a copy beside it")
+        try await run(.undo)
+        try require(!fm.fileExists(atPath: besideCopy.path), "undo of a same-folder paste")
+        try await run(.transfer([file], source, true))
+        try require(fm.fileExists(atPath: file.path), "moving an item into its own folder changes nothing")
+        if let volume = try? ramDisk() {
+            defer { volume.detach() }
+            let crossFile = source.appendingPathComponent("cross.txt")
+            try Data("cross-disk fixture".utf8).write(to: crossFile)
+            let heldCross = try heldCopies()
+            try await run(.transfer([crossFile], volume.url, true))
+            try require(!fm.fileExists(atPath: crossFile.path) && (try? Data(contentsOf: volume.url.appendingPathComponent("cross.txt"))) == Data("cross-disk fixture".utf8), "cross-disk move")
+            try require(try heldCopies() == heldCross, "cross-disk move sends the original to the Trash, not hidden storage")
+            try await run(.undo)
+            try require(fm.fileExists(atPath: crossFile.path) && !fm.fileExists(atPath: volume.url.appendingPathComponent("cross.txt").path), "cross-disk move undo restores the original from the Trash")
+            print("Operations: cross-disk move via RAM disk PASS")
+        } else { print("Operations: cross-disk move skipped (could not create a RAM disk)") }
         let replacement = root.appendingPathComponent("replacement")
         try fm.createDirectory(at: replacement, withIntermediateDirectories: false)
         let old = replacement.appendingPathComponent(file.lastPathComponent)
@@ -619,6 +646,26 @@ final class FileOperations: ObservableObject {
         try JSONEncoder().encode(base).write(to: logFolder.appendingPathComponent("operations.json"), options: .atomic)
         let staleScope = try await OperationsEngine(directory: logFolder).historyScope()
         try require(staleScope.recordCount == base.records.count, "a log for an older snapshot is ignored")
+        let tornLog = root.appendingPathComponent("torn.log")
+        try Data("\"head\"\n{\"a\":1}\n{\"to".utf8).write(to: tornLog)
+        OperationsEngine.trimTornTail(tornLog)
+        try require(try Data(contentsOf: tornLog) == Data("\"head\"\n{\"a\":1}\n".utf8), "a torn log line is cut before the next append")
+    }
+    /// A throwaway APFS RAM disk, so moves between disks are checked for real.
+    private static func ramDisk() throws -> (url: URL, detach: () -> Void) {
+        func run(_ tool: String, _ arguments: [String]) throws -> String {
+            let process = Process(), output = Pipe()
+            process.executableURL = URL(fileURLWithPath: tool); process.arguments = arguments
+            process.standardOutput = output; process.standardError = Pipe()
+            try process.run(); process.waitUntilExit()
+            guard process.terminationStatus == 0 else { throw OperationFailure.message("\(tool) failed") }
+            return String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        }
+        guard let device = try run("/usr/bin/hdiutil", ["attach", "-nomount", "ram://65536"]).split(whereSeparator: \.isWhitespace).first.map(String.init) else { throw OperationFailure.message("No RAM disk") }
+        let detach = { _ = try? run("/usr/bin/hdiutil", ["detach", device, "-force"]) }
+        let name = "FinderPlusCheck-" + UUID().uuidString.prefix(8)
+        do { _ = try run("/usr/sbin/diskutil", ["erasevolume", "APFS", name, device]) } catch { detach(); throw error }
+        return (URL(fileURLWithPath: "/Volumes/" + name), detach)
     }
 }
 
@@ -685,7 +732,7 @@ struct OperationsPanel: View {
                 }
             }
             DisclosureGroup("How verification, Undo and recovery storage work") {
-            Text("Moves within one disk are instant renames. Copies and moves between disks are staged and fingerprint-verified before commit. Undo data is retained in hidden .FinderPlus folders beside affected items; these consume disk space and are never automatically purged. Do not delete them while you need Undo. Folders containing retained storage cannot be moved or renamed. Changed files are never overwritten by Undo or recovery. Trash recovery requires the item to remain in Trash. ZIP creation pauses between process slices; rollback and network/provider calls may finish before pausing.")
+            Text("Moves within one disk are instant renames. Copies and moves between disks are staged and fingerprint-verified before commit; a moved original then goes to the Trash, where Undo can restore it. Undo data is retained in hidden .FinderPlus folders beside affected items; these consume disk space and are never automatically purged. Do not delete them while you need Undo. Folders containing retained storage cannot be moved or renamed. Changed files are never overwritten by Undo or recovery. Trash recovery requires the item to remain in Trash. ZIP creation pauses between process slices; rollback and network/provider calls may finish before pausing.")
                 .font(.caption).foregroundStyle(.secondary)
             Text("Clear File Operation History releases retained storage to system Trash after verification and removes the folder-movement restriction. All app Undo, Redo, and Put Back records are lost. Modified or unverified storage is left untouched.")
                 .font(.caption).foregroundStyle(.secondary)

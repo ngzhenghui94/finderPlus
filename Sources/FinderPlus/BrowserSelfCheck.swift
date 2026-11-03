@@ -1,6 +1,33 @@
 import Foundation
 
 @MainActor enum BrowserSelfCheck {
+    /// Columns keys: ↑ with nothing selected, → before and after a column loads, ↓, type-select and ← keep their column.
+    static func columns() async throws {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory.appendingPathComponent("FinderPlus-columns-check-" + UUID().uuidString, isDirectory: true)
+        try fm.createDirectory(at: root.appendingPathComponent("a/inner"), withIntermediateDirectories: true)
+        try fm.createDirectory(at: root.appendingPathComponent("b"), withIntermediateDirectories: false)
+        for name in ["a/x.txt", "a/y.txt"] { try Data().write(to: root.appendingPathComponent(name)) }
+        defer { try? fm.removeItem(at: root) }
+        let pane = BrowserPane(url: root)
+        // Listings may report the temp folder as /private/var/…, so match on the part below the root.
+        func selected(_ relative: String) -> Bool { pane.selection.count == 1 && pane.selection.first!.hasSuffix(root.lastPathComponent + "/" + relative) }
+        func wait(_ step: String, _ done: () -> Bool) async throws {
+            for _ in 0..<300 { if done() { return }; try await Task.sleep(for: .milliseconds(10)) }
+            throw OperationFailure.message("Columns self-check: \(step) (selection \(pane.selection.map { $0.components(separatedBy: root.lastPathComponent).last ?? $0 }), columns \(pane.columnEntries.map(\.count)))")
+        }
+        pane.load(); try await wait("root listing") { !pane.loading }
+        _ = pane.moveInColumns(126); try await wait("↑ with nothing selected opens the first folder") { selected("a") && pane.columnEntries.count == 2 }
+        _ = pane.moveInColumns(124); try await wait("→ selects the first child") { selected("a/inner") }
+        _ = pane.moveInColumns(125); try await wait("↓ moves within the column") { selected("a/x.txt") && pane.columnEntries.count == 2 }
+        pane.typeSelectInColumns("y"); try await wait("type-select stays in the active column") { selected("a/y.txt") && pane.columnEntries.count == 2 }
+        _ = pane.moveInColumns(123); try await wait("← returns to the parent and keeps its column") { selected("a") && pane.columnEntries.count == 2 }
+        pane.load(); try await wait("reload") { !pane.loading }
+        pane.selection = []
+        _ = pane.moveInColumns(125); _ = pane.moveInColumns(124) // → immediately, before the folder's column has loaded
+        try await wait("→ before the column loads still lands inside it") { selected("a/inner") }
+        print("Columns keys: ↑ ↓ ← →, early →, type-select PASS")
+    }
     static func run() throws {
         let a = UUID(), b = UUID(), c = UUID()
         let layout = PaneLayout.leaf(a).splitting(a, with: b, vertical: true).splitting(b, with: c, vertical: false, before: true)
@@ -34,6 +61,14 @@ import Foundation
         let tagPlist = try PropertyListSerialization.data(fromPropertyList: ["Work\n4", "Red\n6"], format: .binary, options: 0)
         _ = tagPlist.withUnsafeBytes { setxattr(tagged.path, "com.apple.metadata:_kMDItemUserTags", $0.baseAddress, tagPlist.count, 0, 0) }
         guard try FileEntry(url: tagged).tagColors == ["Work": 4, "Red": 6] else { throw CocoaError(.validationInvalidDate) }
+        // The sorted listing is cached; every input that changes it must refresh it.
+        let pane = BrowserPane(url: root)
+        pane.entries = entries
+        let byName = pane.shown.map(\.name)
+        pane.sortKey = "Size"; pane.ascending = false
+        let bySize = pane.shown.filter { !$0.isDirectory }.map(\.name)
+        pane.filter = "b"
+        guard byName.contains("a.txt"), bySize == ["b.txt", "c.txt", "a.txt"], pane.shown.map(\.name) == ["b.txt"] else { throw CocoaError(.validationStringTooLong) }
         var job = TransferJob(id: UUID(), title: "Copy")
         job.copiedBytes = 500_000_000; job.totalBytes = 1_000_000_000; job.bytesPerSecond = 100_000_000
         guard job.transferStats.contains("500 MB of 1 GB"), job.transferStats.contains("/s"), job.transferStats.contains("left") else { throw CocoaError(.validationNumberTooLarge) }

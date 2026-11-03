@@ -11,7 +11,7 @@ Requires the Xcode command-line tools and Swift 6. No third-party packages or AP
 ./dist/FinderPlus.app/Contents/MacOS/FinderPlus --self-check
 ```
 
-`./build.sh` produces an ad-hoc-signed local build. The delivered `dist/FinderPlus.zip` and `/Applications/FinderPlus.app` are Developer ID–signed with hardened runtime, Apple-notarized, and stapled; the installed app passed Gatekeeper assessment. Rebuilding replaces that signed bundle, so a rebuilt app must be signed and notarized again before distribution.
+`./build.sh` produces an ad-hoc-signed local build; macOS asks again for folder access after each ad-hoc rebuild. `dist/FinderPlus.zip` is a Developer ID–signed, notarized and stapled release build. A rebuilt app must be signed and notarized again before you distribute it.
 
 ## Browsing
 
@@ -70,15 +70,15 @@ Copy, move, duplicate, rename, previewed batch rename, create folder, new folder
 
 The Operations window exposes whole-job progress with bytes copied, speed and time left, queued-job ordering, pause/resume, cancellation, undo/redo, failures with a plain-language next step and Retry, and interrupted-work recovery. Name conflicts show the existing and incoming versions side by side with the newer one marked; Keep Both is the default and Stop (Esc) cancels the operation. Moves within one disk are journaled renames: instant, and they need no extra space. Copies, and moves between disks, are staged and verified before publishing; same-disk copies of files are APFS clones. Existing names are never silently overwritten. Undo checks that affected files still match the recorded state and refuses to overwrite later external edits.
 
-Copy verification includes user extended attributes. macOS's system-owned `com.apple.provenance` is excluded from fingerprints because macOS assigns it to newly created files; FinderPlus does not remove or rewrite that security metadata.
+Copy verification includes user extended attributes. macOS's system-owned `com.apple.provenance` and `com.apple.macl` are excluded from fingerprints because macOS assigns them to new files and to items moved into the Trash; FinderPlus does not remove or rewrite that security metadata.
 
-Undo can retain hidden `.FinderPlus-…` staging/backup folders beside affected files (replaced items, and originals of moves between disks). Do not manually remove or move that storage. Moving a folder containing active retained storage is refused. **File Operations → Clear File Operation History…** explicitly reviews and trashes owned retained storage, then removes the corresponding undo history; it never empties system Trash. Keep an independent backup: the journal is not a backup service, and external changes can prevent recovery.
+Undo can retain hidden `.FinderPlus-…` staging/backup folders beside affected files (replaced items, and originals of moves from disks without a Trash, such as network shares). Do not manually remove or move that storage. Moving a folder containing active retained storage is refused. Moves within one disk are renames. Moves between disks put the verified original in the Trash: empty the Trash to reclaim the space; Undo and Put Back restore it while it is there. **File Operations → Clear File Operation History…** explicitly reviews and trashes owned retained storage, then removes the corresponding undo history; it never empties system Trash. Keep an independent backup: the journal is not a backup service, and external changes can prevent recovery.
 
 Folder comparison hashes file contents recursively. Synchronization copies only reviewed selections; it does not propagate deletions. Symlinks, type conflicts, equal-date content conflicts and changes since review require manual resolution. Case-only renames and cyclic batch renames are refused instead of risking data loss. Put Back applies to Trash actions tracked by FinderPlus, not arbitrary untracked Finder Trash entries.
 
 ## Send to Nearby Mac
 
-Select files and choose **File → Send to Nearby Mac…** (or the context menu) to send them straight to another Mac running FinderPlus on the same local network, similar to Spacedrive's Spacedrop. Peers are found over Bonjour; the receiver must accept each request, and accepted files are saved to Downloads under a new name if one already exists, with the macOS quarantine flag set like AirDrop. Folders must be compressed first. Transfers use plain TCP and are **not encrypted**—use them only on networks you trust.
+Nearby Share is off by default; turn it on in **Settings → General** on both Macs. While it is on, this Mac is visible to other FinderPlus Macs on the network, and sender names are not verified. Select files and choose **File → Send to Nearby Mac…** (or the context menu) to send them straight to another Mac running FinderPlus on the same local network, similar to Spacedrive's Spacedrop. Peers are found over Bonjour; the receiver must accept each request, and accepted files are saved to Downloads under a new name if one already exists, with the macOS quarantine flag set like AirDrop. Folders must be compressed first. Transfers use plain TCP and are **not encrypted**—use them only on networks you trust.
 
 ## Cloud folders and privacy
 

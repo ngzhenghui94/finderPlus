@@ -578,6 +578,8 @@ actor LocalSearchIndex {
     private var cache: [String: Snapshot] = [:]
 
     func invalidateCache() { cache.removeAll() }
+    /// Snapshots are reused for 10 s only; past that they just hold memory (a Home scan is ~1M records).
+    func evictExpired() { cache = cache.filter { Date().timeIntervalSince($0.value.date) < 10 } }
 
     func search(plan: SearchPlan, roots: [URL], includeHidden: Bool, contentEnabled: Bool, ocrEnabled: Bool) throws -> SearchOutput {
         try Task.checkCancellation()
@@ -640,8 +642,10 @@ actor LocalSearchIndex {
                 try Task.checkCancellation()
                 do {
                     let values = try url.resourceValues(forKeys: Set(keys))
-                    if values.isSymbolicLink == true { enumerator.skipDescendants(); continue }
-                    guard isInside(url, root: root) else { enumerator.skipDescendants(); continue }
+                    // The enumerator never follows links. skipDescendants() only after a folder: after a file or link
+                    // it can skip the contents of a folder returned just before, silently dropping results.
+                    if values.isSymbolicLink == true { continue }
+                    guard isInside(url, root: root) else { if values.isDirectory == true { enumerator.skipDescendants() }; continue }
                     let local = isLocallyAvailable(url, values: values)
                     if values.isDirectory == true && !local {
                         enumerator.skipDescendants()
@@ -650,15 +654,15 @@ actor LocalSearchIndex {
                     let entry = try FileEntry(url: url)
                     var record = SearchRecord(entry: entry)
                     record.local = local
-                    if local, needsMetadata, let item = MDItemCreate(kCFAllocatorDefault, url.path as CFString) {
-                        record.sources = MDItemCopyAttribute(item, kMDItemWhereFroms) as? [String] ?? []
-                        record.downloaded = MDItemCopyAttribute(item, "kMDItemDownloadedDate" as CFString) as? Date
-                        record.screenshot = (MDItemCopyAttribute(item, "kMDItemIsScreenCapture" as CFString) as? Bool) ?? false
+                    if local, needsMetadata {
+                        // Spotlight takes these from the file's own attributes; reading them directly costs microseconds, not a Spotlight round trip.
+                        record.sources = metadataAttribute(url, "kMDItemWhereFroms") as? [String] ?? []
+                        record.downloaded = (metadataAttribute(url, "kMDItemDownloadedDate") as? [Date])?.first
+                        record.screenshot = metadataAttribute(url, "kMDItemIsScreenCapture") as? Bool ?? false
                     }
-                    if local && needsMetadata && record.sources.isEmpty { record.sources = recordedDownloadSources(url) }
                     rootRecords.append(record)
                 } catch {
-                    enumerator.skipDescendants()
+                    if (try? url.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true { enumerator.skipDescendants() }
                     if scanIssues.count < 12 { scanIssues.append("\(url.path): \(error.localizedDescription)") }
                 }
             }
@@ -687,14 +691,15 @@ actor LocalSearchIndex {
         entries.sort { $0.url.path.localizedStandardCompare($1.url.path) == .orderedAscending }
         return SearchOutput(entries: entries, issues: Array(issues.prefix(20)), usedCache: usedCache)
     }
-    private func recordedDownloadSources(_ url: URL) -> [String] {
-        let key = "com.apple.metadata:kMDItemWhereFroms"
+    /// A `com.apple.metadata:<name>` attribute (a property list), as written by browsers and screencapture.
+    private func metadataAttribute(_ url: URL, _ name: String) -> Any? {
+        let key = "com.apple.metadata:" + name
         let count = getxattr(url.path, key, nil, 0, 0, XATTR_NOFOLLOW)
-        guard count > 0 && count <= 1024 * 1024 else { return [] }
+        guard count > 0 && count <= 1024 * 1024 else { return nil }
         var data = Data(count: count)
         let actual = data.withUnsafeMutableBytes { getxattr(url.path, key, $0.baseAddress, count, 0, XATTR_NOFOLLOW) }
-        guard actual == count else { return [] }
-        return (try? PropertyListSerialization.propertyList(from: data, format: nil)) as? [String] ?? []
+        guard actual == count else { return nil }
+        return try? PropertyListSerialization.propertyList(from: data, format: nil)
     }
 
 
@@ -756,6 +761,7 @@ final class SearchService: ObservableObject {
     }
 
     private func complete(_ output: SearchOutput, token: UUID) {
+        Task { try? await Task.sleep(for: .seconds(11)); await LocalSearchIndex.shared.evictExpired() }
         guard generation == token else { return }
         results = output.entries
         isSearching = false; task = nil

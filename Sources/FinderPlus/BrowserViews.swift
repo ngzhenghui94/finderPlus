@@ -135,7 +135,8 @@ struct PaneView: View {
                 Divider()
                 HStack(spacing: 8) {
                     if pane.loading || pane.search.isSearching { ProgressView().controlSize(.mini) }
-                    Text(statusText)
+                    if pane.slowLoad { Text("Waiting for macOS permission or a slow disk…").foregroundStyle(.orange).help("macOS may be asking for access to this folder, or a network disk is not responding.") }
+                    else { Text(statusText) }
                     Spacer()
                     if pane.query.isEmpty { Text(availableSpace).lineLimit(1) }
                     else { Text(pane.search.status).lineLimit(1) }
@@ -172,7 +173,8 @@ struct PaneView: View {
         }.buttonStyle(.plain).foregroundStyle(.secondary).padding(.trailing, 9).background(Color(nsColor: .controlBackgroundColor))
     }
     var statusText: String {
-        let count = pane.mode == .columns && pane.query.isEmpty ? (pane.columnEntries.last { $0.contains { pane.selection.contains($0.id) } } ?? pane.shown).count : pane.shown.count
+        let column = pane.mode == .columns && pane.query.isEmpty ? pane.columnEntries.last { $0.contains { pane.selection.contains($0.id) } } : nil
+        let count = column.map { pane.sorted($0).count } ?? pane.shown.count
         return pane.selection.isEmpty ? "\(count) item\(count == 1 ? "" : "s")" : "\(pane.selection.count) of \(count) selected"
     }
     var availableSpace: String { if let value = try? pane.url.resourceValues(forKeys: [.volumeAvailableCapacityKey]).volumeAvailableCapacity { return ByteCountFormatter.string(fromByteCount: Int64(value), countStyle: .file) + " available" }; return "" }
@@ -222,7 +224,7 @@ struct PaneView: View {
             TableColumn("Name") { item in
                 HStack(spacing: 6) {
                     FileIcon(url: item.url, size: 18); Text(item.name).lineLimit(1); TagDots(tags: item.tags, colors: item.tagColors); cloud(item)
-                    if !pane.query.isEmpty, item.url.deletingLastPathComponent().standardizedFileURL != pane.url.standardizedFileURL { Text("in " + item.url.deletingLastPathComponent().lastPathComponent).foregroundStyle(.tertiary).lineLimit(1).help(item.url.deletingLastPathComponent().path) }
+                    if !pane.query.isEmpty, item.url.deletingLastPathComponent().resolvingSymlinksInPath().standardizedFileURL != pane.url.resolvingSymlinksInPath().standardizedFileURL { Text("in " + item.url.deletingLastPathComponent().lastPathComponent).foregroundStyle(.tertiary).lineLimit(1).help(item.url.deletingLastPathComponent().path) }
                 }
                     .contextMenu { FileContextMenu(workspace: workspace, pane: pane, entry: item) }.onDrag { drag(item) }
             }.width(min: 140, ideal: 250)
@@ -371,7 +373,8 @@ struct TagDots: View {
 /// Uses the colour recorded with the tag; falls back to matching Finder's standard tag names; colourless tags are grey.
 @MainActor func tagColor(_ name: String, index: Int? = nil) -> Color {
     let labels = NSWorkspace.shared.fileLabels, colors = NSWorkspace.shared.fileLabelColors
-    let resolved = index ?? labels.firstIndex(of: name) ?? 0
+    // 0 means no colour was recorded (some tools write plain names), so fall back to the standard name.
+    let resolved = index.flatMap { $0 > 0 ? $0 : nil } ?? labels.firstIndex(of: name) ?? 0
     return resolved > 0 && resolved < colors.count ? Color(nsColor: colors[resolved]) : .gray
 }
 

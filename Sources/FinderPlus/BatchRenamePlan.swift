@@ -35,6 +35,7 @@ struct BatchRenamePlan {
                 let number = String(options.start + index)
                 stem = options.prefix + String(repeating: "0", count: max(0, options.digits - number.count)) + number + options.suffix
             }
+            guard !stem.isEmpty else { throw OperationFailure.message("“\(url.lastPathComponent)” would be left without a name.") }
             return Change(url: url, name: ext.isEmpty ? stem : stem + "." + ext)
         }
         try validate(changes)
@@ -79,6 +80,8 @@ struct BatchRenamePlan {
         options.prefix = "Photo-"
         let plan = try make(urls: [a, b], options: options)
         guard plan.map(\.name) == ["Photo-001.txt", "Photo-002.txt"] else { throw OperationFailure.message("Numbered rename self-check failed") }
+        var emptied = Options(); emptied.find = "a"
+        guard (try? make(urls: [a], options: emptied)) == nil else { throw OperationFailure.message("Empty-name rename self-check failed") }
         var rejected = 0
         for changes in [[Change(url: a, name: "b.txt")], [Change(url: a, name: "../bad")], [Change(url: a, name: "same"), Change(url: b, name: "SAME")]] {
             do { try validate(changes) } catch { rejected += 1 }

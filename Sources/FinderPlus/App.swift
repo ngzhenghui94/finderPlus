@@ -41,6 +41,7 @@ import Combine
             Task {
                 do {
                     try BrowserSelfCheck.run()
+                    try await BrowserSelfCheck.columns()
                     try NaturalQuery.selfCheck()
                     try FolderComparison.selfCheck()
                     try BatchRenamePlan.selfCheck()
@@ -53,7 +54,7 @@ import Combine
             return
         }
         buildMenus()
-        NearbyShareService.shared.start()
+        NearbyShareService.shared.update(enabled: AppPreferences.shared.nearbyEnabled)
         restoreWindows(Workspace.decode("sessions") ?? [])
         FileOperations.shared.$jobs.map(\.count).removeDuplicates().dropFirst().sink { [weak self] count in
             if count > 0 { DispatchQueue.main.async { self?.showOperations() } }
@@ -284,7 +285,8 @@ import Combine
         }
         if let chars = event.characters, chars.rangeOfCharacter(from: .alphanumerics) != nil {
             if Date().timeIntervalSince(lastTyped) > 0.8 { typedName = "" }; typedName += chars; lastTyped = Date()
-            if let file = pane.displayed.first(where: { $0.name.lowercased().hasPrefix(typedName.lowercased()) }) { if pane.mode == .columns && pane.query.isEmpty { pane.chooseColumn(file, at: 0) } else { pane.selection = [file.id] } }
+            if pane.mode == .columns && pane.query.isEmpty { pane.typeSelectInColumns(typedName) }
+            else if let file = pane.displayed.first(where: { $0.name.lowercased().hasPrefix(typedName.lowercased()) }) { pane.selection = [file.id] }
             return nil
         }
         return event

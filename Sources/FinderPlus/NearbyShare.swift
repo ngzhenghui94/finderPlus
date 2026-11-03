@@ -20,9 +20,9 @@ enum NearbyShare {
     /// Trust boundary: the offer's safe names, or nil when it must be refused.
     static func validNames(_ offer: Offer) -> [String]? {
         let names = offer.files.compactMap { safeName($0.name) }
-        // 1 PiB per file keeps the total of 10,000 sizes far from Int64 overflow.
+        // 1 TiB per file: 10,000 of them total ~2^53, far below Int64's 2^63, so summing sizes cannot overflow.
         guard !offer.files.isEmpty, offer.files.count <= 10_000, names.count == offer.files.count,
-              offer.files.allSatisfy({ (0...(1 << 50)).contains($0.size) }) else { return nil }
+              offer.files.allSatisfy({ (0...(1 << 40)).contains($0.size) }) else { return nil }
         return names
     }
 
@@ -96,6 +96,8 @@ enum NearbyShare {
     static func selfCheck() async throws {
         guard safeName("a.pdf") == "a.pdf", safeName("x:y") == "x-y", ["", ".", "..", "../etc", "a/b", "/abs"].allSatisfy({ safeName($0) == nil }),
               validNames(Offer(sender: "x", files: [Item(name: "a", size: .max), Item(name: "b", size: .max)])) == nil,
+              validNames(Offer(sender: "x", files: Array(repeating: Item(name: "a", size: 1 << 50), count: 10_000))) == nil,
+              validNames(Offer(sender: "x", files: Array(repeating: Item(name: "a", size: 1 << 40), count: 10_000)))?.count == 10_000,
               validNames(Offer(sender: "x", files: [Item(name: "a", size: 1)])) == ["a"] else { throw OperationFailure.message("Nearby share name check failed.") }
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("FinderPlus-share-\(UUID().uuidString)")
         let source = root.appendingPathComponent("out"), inbox = root.appendingPathComponent("in")
@@ -152,7 +154,12 @@ extension NWConnection {
     private var peers: [String: NWEndpoint] = [:]
     private var prompting = false
 
-    func start() {
+    /// Opens the network inbox only while the user has turned Nearby Share on in Settings.
+    func update(enabled: Bool) { if enabled { start() } else { stop() } }
+    private func stop() {
+        listener?.cancel(); browser?.cancel(); listener = nil; browser = nil; peers = [:]
+    }
+    private func start() {
         guard listener == nil, let listener = try? NWListener(using: NearbyShare.parameters()) else { return }
         listener.service = NWListener.Service(name: ownName, type: NearbyShare.serviceType)
         listener.serviceRegistrationUpdateHandler = { change in
@@ -173,6 +180,7 @@ extension NWConnection {
 
     func send(_ urls: [URL]) {
         guard !urls.isEmpty else { return }
+        guard listener != nil else { explain("Turn on Nearby Share in Settings › General on both Macs, then try again."); return }
         guard urls.allSatisfy({ (try? $0.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true }) else { explain("Send to Nearby Mac sends files only. Compress folders first."); return }
         guard !peers.isEmpty else { explain("No nearby Macs found. Open FinderPlus on the other Mac and connect both Macs to the same network."); return }
         let names = peers.keys.sorted()
@@ -209,7 +217,7 @@ extension NWConnection {
         let list = offer.files.prefix(8).map(\.name).joined(separator: "\n") + (offer.files.count > 8 ? "\n…and \(offer.files.count - 8) more" : "")
         NSApp.requestUserAttention(.informationalRequest)
         let alert = NSAlert(); alert.messageText = "“\(offer.sender)” wants to send you \(offer.files.count) file\(offer.files.count == 1 ? "" : "s") (\(total))"
-        alert.informativeText = list + "\n\nAccepted files are saved to Downloads."
+        alert.informativeText = list + "\n\nThe sender's name is not verified; accept only if you expect these files. Accepted files are saved to Downloads."
         alert.addButton(withTitle: "Accept"); alert.addButton(withTitle: "Decline")
         return alert.runModal() == .alertFirstButtonReturn
     }

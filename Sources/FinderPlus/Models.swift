@@ -153,17 +153,18 @@ struct SavedSearch: Identifiable, Codable {
     let id: UUID
     @Published var tabs: [BrowserTab]
     @Published var activeTab: UUID
-    @Published var entries: [FileEntry] = []
+    @Published var entries: [FileEntry] = [] { didSet { shownCache = nil } }
+    @Published var slowLoad = false
     @Published var selection: Set<String> = []
     @Published var error = ""
     @Published var loading = false
-    @Published var query = ""
-    @Published var filter = ""
+    @Published var query = "" { didSet { shownCache = nil } }
+    @Published var filter = "" { didSet { shownCache = nil } }
     @Published var searchAllRoots = false
     @Published var savedSearchRoots: [URL]?
     var searchRoots: [URL] { savedSearchRoots ?? (searchAllRoots ? AppPreferences.shared.searchRoots : [url]) }
-    @Published var sortKey = "Name"
-    @Published var ascending = true
+    @Published var sortKey = "Name" { didSet { shownCache = nil } }
+    @Published var ascending = true { didSet { shownCache = nil } }
     @Published var columnFolders: [URL] = []
     @Published var columnEntries: [[FileEntry]] = []
     let search = SearchService()
@@ -186,33 +187,59 @@ struct SavedSearch: Identifiable, Codable {
         tabs = snapshot?.tabs.isEmpty == false ? snapshot!.tabs : [tab]
         activeTab = snapshot?.activeTab ?? tab.id
         if !tabs.contains(where: { $0.id == activeTab }) { activeTab = tabs[0].id }
-        searchObservation = search.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }
+        searchObservation = search.objectWillChange.sink { [weak self] _ in self?.shownCache = nil; self?.objectWillChange.send() }
     }
     var snapshot: PaneSnapshot { PaneSnapshot(id: id, tabs: tabs, activeTab: activeTab) }
     var canGoBack: Bool { tabs.first(where: { $0.id == activeTab })?.back.isEmpty == false }
     var canGoForward: Bool { tabs.first(where: { $0.id == activeTab })?.forward.isEmpty == false }
     var selectionAnchor: String?
     var selected: [URL] { selection.sorted().map { URL(fileURLWithPath: $0) } }
-    var shown: [FileEntry] { sorted(query.isEmpty ? entries : search.results) }
+    /// Sorted once per change of entries, results, filter or sort order, not on every redraw.
+    private var shownCache: (foldersFirst: Bool, value: [FileEntry])?
+    var shown: [FileEntry] {
+        let foldersFirst = AppPreferences.shared.foldersFirst
+        if let cache = shownCache, cache.foldersFirst == foldersFirst { return cache.value }
+        let value = sorted(query.isEmpty ? entries : search.results)
+        shownCache = (foldersFirst, value)
+        return value
+    }
     /// What the user sees, in order: grouped in List and Icons, so keyboard and shift-click follow the screen.
     var displayed: [FileEntry] { mode == .list || mode == .icons ? AppPreferences.shared.groupBy.groups(shown).flatMap(\.entries) : shown }
     /// Finder-style column keys: ↑↓ within the selected item's column, → into a folder, ← back to its parent column.
     func moveInColumns(_ key: UInt16) -> Bool {
-        guard selection.count == 1, let id = selection.first, let column = columnEntries.lastIndex(where: { $0.contains { $0.id == id } }) else {
-            guard key == 124 || key == 125, let first = sorted(columnEntries.first ?? []).first else { return false }
+        guard let column = selectedColumn, let id = selection.first else {
+            guard [124, 125, 126].contains(key), let first = sorted(columnEntries.first ?? []).first else { return false }
             chooseColumn(first, at: 0); return true
         }
         let items = sorted(columnEntries[column])
         guard let index = items.firstIndex(where: { $0.id == id }) else { return false }
         switch key {
         case 125, 126: chooseColumn(items[min(max(index + (key == 125 ? 1 : -1), 0), items.count - 1)], at: column)
-        case 124: if items[index].isDirectory, column + 1 < columnEntries.count, let first = sorted(columnEntries[column + 1]).first { chooseColumn(first, at: column + 1) }
+        case 124: if items[index].isDirectory { chooseColumn(items[index], at: column, selectFirst: true) } // works before its column has loaded
         case 123:
             if column > 0, let folder = try? FileEntry(url: columnFolders[column]) { chooseColumn(folder, at: column - 1) }
             else { navigate(url.deletingLastPathComponent()) }
         default: return false
         }
         return true
+    }
+    /// The column holding the single selected item.
+    private var selectedColumn: Int? {
+        guard selection.count == 1, let id = selection.first else { return nil }
+        return columnEntries.lastIndex { $0.contains { $0.id == id } }
+    }
+    /// Type-to-select inside the column the user is working in, not always the first one.
+    func typeSelectInColumns(_ prefix: String) {
+        let column = selectedColumn ?? 0
+        guard columnEntries.indices.contains(column),
+              let match = sorted(columnEntries[column]).first(where: { $0.name.lowercased().hasPrefix(prefix.lowercased()) }) else { return }
+        chooseColumn(match, at: column)
+    }
+    /// Lists a folder. An item that vanishes or can't be read between listing and reading is left out
+    /// instead of failing the whole folder (Downloads does this whenever a download finishes).
+    nonisolated static func listing(_ folder: URL, hidden: Bool) throws -> [FileEntry] {
+        try FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: [.isDirectoryKey, .fileSizeKey, .contentModificationDateKey], options: hidden ? [] : [.skipsHiddenFiles])
+            .compactMap { try Task.checkCancellation(); return try? FileEntry(url: $0) }
     }
     func sorted(_ values: [FileEntry]) -> [FileEntry] {
         values.filter { filter.isEmpty || $0.name.localizedCaseInsensitiveContains(filter) }.sorted {
@@ -257,17 +284,19 @@ struct SavedSearch: Identifiable, Codable {
     func load() {
         generation = UUID(); let token = generation, folder = url, hidden = AppPreferences.shared.showHidden
         if entries.first?.url.deletingLastPathComponent().standardizedFileURL != folder.standardizedFileURL { entries = []; selectionAnchor = nil }
-        loading = true; error = ""; columnFolders = [folder]; columnEntries = []; columnToken = UUID()
+        loading = true; slowLoad = false; error = ""; columnFolders = [folder]; columnEntries = []; columnToken = UUID()
         loadTask?.cancel()
         let work = Task.detached(priority: .userInitiated) { () -> Result<[FileEntry], Error> in
-            Result { try FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: [.isDirectoryKey, .fileSizeKey, .contentModificationDateKey], options: hidden ? [] : [.skipsHiddenFiles]).map { try Task.checkCancellation(); return try FileEntry(url: $0) } }
+            Result { try BrowserPane.listing(folder, hidden: hidden) }
         }
         loadTask = work
+        // A privacy prompt or a hung network disk blocks listing with no error; say so instead of spinning silently.
+        Task { try? await Task.sleep(for: .seconds(3)); if generation == token && loading { slowLoad = true } }
         Task {
             let result = await work.value
             guard generation == token else { return }
             switch result { case .success(let files): entries = files; columnEntries = [files]; case .failure(let failure): entries = []; error = failure.localizedDescription }
-            loading = false
+            loading = false; slowLoad = false
             watch(folder)
         }
     }
@@ -296,18 +325,30 @@ struct SavedSearch: Identifiable, Codable {
             }
         }
     }
-    func chooseColumn(_ entry: FileEntry, at index: Int) {
+    /// `selectFirst`: once the folder's column is showing, select its first item (→ in Columns).
+    func chooseColumn(_ entry: FileEntry, at index: Int, selectFirst: Bool = false) {
         selection = [entry.id]
-        columnFolders = Array(columnFolders.prefix(index + 1)); columnEntries = Array(columnEntries.prefix(index + 1))
         let token = UUID(); columnToken = token
+        // The folder's column is already open (← back to it, or → right after it loaded): keep it, don't list it again.
+        if entry.isDirectory, columnFolders.indices.contains(index + 1), columnEntries.indices.contains(index + 1), columnFolders[index + 1] == entry.url {
+            columnFolders = Array(columnFolders.prefix(index + 2)); columnEntries = Array(columnEntries.prefix(index + 2))
+            if selectFirst, let first = sorted(columnEntries[index + 1]).first { chooseColumn(first, at: index + 1) }
+            return
+        }
+        columnFolders = Array(columnFolders.prefix(index + 1)); columnEntries = Array(columnEntries.prefix(index + 1))
         guard entry.isDirectory else { return }
         let folder = entry.url, hidden = AppPreferences.shared.showHidden
         Task {
             let result = await Task.detached(priority: .userInitiated) { () -> Result<[FileEntry], Error> in
-                Result { try FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil, options: hidden ? [] : [.skipsHiddenFiles]).map { try FileEntry(url: $0) } }
+                Result { try BrowserPane.listing(folder, hidden: hidden) }
             }.value
             guard columnToken == token else { return }
-            switch result { case .success(let files): columnFolders.append(folder); columnEntries.append(files); case .failure(let failure): error = failure.localizedDescription }
+            switch result {
+            case .success(let files):
+                columnFolders.append(folder); columnEntries.append(files)
+                if selectFirst, let first = sorted(files).first { chooseColumn(first, at: index + 1) }
+            case .failure(let failure): error = failure.localizedDescription
+            }
         }
     }
     deinit { watcher?.cancel(); searchTimer?.invalidate(); reloadTimer?.invalidate() }

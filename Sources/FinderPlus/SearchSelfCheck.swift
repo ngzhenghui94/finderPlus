@@ -130,6 +130,13 @@ extension NaturalQuery {
         try requireSearch(parse("ext:txt OR ext:pdf", now: now).filters.count == 1, "OR chip removes without dangling operators")
         try requireSearch(parse("name:\"a \\\"quoted\\\" name\"", now: now).filters.count == 1, "escaped quote tokenization")
 
+        let capture = try file("capture.png")
+        let captureFlag = try PropertyListSerialization.data(fromPropertyList: true, format: .binary, options: 0)
+        _ = captureFlag.withUnsafeBytes { setxattr(capture.path, "com.apple.metadata:kMDItemIsScreenCapture", $0.baseAddress, captureFlag.count, 0, XATTR_NOFOLLOW) }
+        let deep = root.appendingPathComponent("deep", isDirectory: true)
+        try manager.createDirectory(at: deep, withIntermediateDirectories: false)
+        let needle = try file("needle.txt", directory: deep)
+        for index in 0..<12 { try manager.createSymbolicLink(at: root.appendingPathComponent("link\(index)"), withDestinationURL: deep) }
         let index = LocalSearchIndex()
         func search(_ query: String, hidden: Bool = false, content: Bool = false, roots: [URL]? = nil) async throws -> SearchOutput {
             try await index.search(plan: parse(query, now: now), roots: roots ?? [root], includeHidden: hidden, contentEnabled: content, ocrEnabled: false)
@@ -140,6 +147,8 @@ extension NaturalQuery {
         try requireSearch(!names.contains("outside-secret.txt") && !names.contains("outside-link.txt") && !names.contains("escape"), "symlinks cannot escape approved scope")
         try requireSearch(!names.contains("package-secret.txt"), "package descendants excluded")
         try requireSearch(!names.contains(".hidden.txt"), "hidden files are opt-in")
+        try requireSearch(canonicalSearchURLs(try await search("name:needle").entries.map(\.url)) == canonicalSearchURLs([needle]), "links next to a folder do not hide its files")
+        try requireSearch(try await search("screenshots").entries.contains { $0.name == "capture.png" }, "screenshot flag read from the file's metadata attribute")
         let cached = try await search("name:report")
         try requireSearch(cached.usedCache && cached.entries.count == 1, "scoped metadata cache")
         let freshFile = try file("cache-refresh.txt")

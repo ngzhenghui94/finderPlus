@@ -15,6 +15,7 @@ final class AppPreferences: ObservableObject {
     @Published var contentEnabled: Bool { didSet { defaults.set(contentEnabled, forKey: "contentEnabled") } }
     @Published var ocrEnabled: Bool { didSet { defaults.set(ocrEnabled, forKey: "ocrEnabled") } }
     @Published var showCloud: Bool { didSet { defaults.set(showCloud, forKey: "showCloud") } }
+    @Published var nearbyEnabled: Bool { didSet { defaults.set(nearbyEnabled, forKey: "nearbyEnabled"); NearbyShareService.shared.update(enabled: nearbyEnabled) } }
     @Published var groupBy: FileGrouping { didSet { defaults.set(groupBy.rawValue, forKey: "groupBy") } }
     @Published var settingsError: String?
 
@@ -28,6 +29,7 @@ final class AppPreferences: ObservableObject {
         contentEnabled = defaults.bool(forKey: "contentEnabled")
         ocrEnabled = defaults.bool(forKey: "ocrEnabled")
         showCloud = defaults.object(forKey: "showCloud") as? Bool ?? true
+        nearbyEnabled = defaults.bool(forKey: "nearbyEnabled")
         groupBy = FileGrouping(rawValue: defaults.string(forKey: "groupBy") ?? "") ?? .none
         var roots: [URL] = []
         var scoped: [URL] = []
@@ -90,6 +92,11 @@ struct SettingsView: View {
                 }
                 Text("Finder: Return renames. Explorer: F2 renames, Return opens. Total Commander: F5 copies, F6 moves, F7 creates a folder, F8 trashes.")
                     .font(.caption).foregroundStyle(.secondary)
+                Section("Nearby Share") {
+                    Toggle("Send and receive files with nearby Macs", isOn: $preferences.nearbyEnabled)
+                    Text("While on, this Mac is visible to other FinderPlus Macs on the same network and can receive requests you must accept. Transfers are not encrypted and sender names are not verified; leave this off on public networks.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
             }.formStyle(.grouped).tabItem { Label("General", systemImage: "gearshape") }
             KeyboardShortcutsView().tabItem { Label("Keyboard", systemImage: "keyboard") }
             Form {
