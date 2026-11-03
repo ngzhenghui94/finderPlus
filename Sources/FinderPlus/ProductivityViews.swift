@@ -123,7 +123,7 @@ struct CompareFoldersView: View {
         Task {
             do {
                 try await Task.detached(priority: .userInitiated) { try comparison.validate(copies) }.value
-                FileOperations.shared.synchronize(copies.map { (source: $0.source, destination: $0.destination) })
+                FileOperations.shared.synchronize(try copies.map { try OperationPlannedCopy(source: $0.source, destination: $0.destination, reviewed: $0, allowCloudDownloads: comparison.allowCloudDownloads) })
                 self.comparison = nil
                 selected.removeAll()
                 message = "Queued \(copies.count) reviewed copies. See the operations queue for progress and conflicts. Compare again after completion."

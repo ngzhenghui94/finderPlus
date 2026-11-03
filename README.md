@@ -62,11 +62,15 @@ Date filters use the local calendar. Size query units are binary (`1 GB` means 1
 
 Content search and Vision OCR are separate opt-ins and only run under approved roots. Plain words match names and, with content search on, text and PDF contents; OCR runs only for `content:` filters. Search skips symlink traversal, package contents, network-volume traversal and online-only cloud content. Metadata is cached in memory for ten seconds; application file operations invalidate the cache immediately. Cold searches scan the selected tree and are not guaranteed instant on very large folders.
 
+Malformed Boolean groups fall back to literal-name matching with a warning rather than matching every file. Failed operators keep their following words as search terms. Pipes, devices and sockets are not opened for content search or previews. Changing approved roots or content/OCR permissions cancels active searches and clears their results; an unavailable remaining root cannot cause a removed approval to return after restart. Bookmark-save failures are shown in Settings.
+
 Content limits bound resource use: text up to 8 MiB, PDFs up to 32 MiB and 200 text pages; OCR up to 32 MiB, images downsampled to 4096 pixels, and up to 20 PDF pages. Encrypted, unsupported, unreadable and skipped files are reported. Content/OCR results therefore are not a complete forensic inventory.
 
 ## File operations and recovery
 
 Copy, move, duplicate, rename, previewed batch rename, create folder, new folder with selection, ZIP compression, Finder aliases, Trash/Put Back, and reviewed folder comparison/synchronization are supported. Internal multi-file drag/drop and standard file-URL drops use the same operation queue. The outgoing standard file-URL drag payload exposes the first selected item to other applications; use clipboard copy/paste for multi-item transfers to Finder.
+
+**New Folder with Selection** is one transaction: folder creation and selected moves either complete together or roll back together, and one Undo/Redo covers the whole action. Failed or no-op operations preserve the existing Redo history.
 
 The Operations window exposes whole-job progress with bytes copied, speed and time left, queued-job ordering, pause/resume, cancellation, undo/redo, failures with a plain-language next step and Retry, and interrupted-work recovery. Name conflicts show the existing and incoming versions side by side with the newer one marked; Keep Both is the default and Stop (Esc) cancels the operation. Moves within one disk are journaled renames: instant, and they need no extra space. Renames, same-disk moves and Trash record a metadata fingerprint (names, sizes, dates, file IDs, extended attributes) rather than reading file contents, so they also work on folders holding online-only cloud files. Copies, and moves between disks, are staged and verified before publishing; same-disk copies of files are APFS clones. Existing names are never silently overwritten. Undo checks that affected files still match the recorded state and refuses to overwrite later external edits.
 
@@ -76,9 +80,13 @@ Undo can retain hidden `.FinderPlus-…` staging/backup folders beside affected 
 
 Folder comparison hashes file contents recursively. Synchronization copies only reviewed selections, replacing reviewed destination files (Undo restores them); it does not propagate deletions. Symlinks, type conflicts, equal-date content conflicts and changes since review require manual resolution. Case-only renames and cyclic batch renames are refused instead of risking data loss. Put Back applies to Trash actions tracked by FinderPlus, not arbitrary untracked Finder Trash entries.
 
+Queued synchronization retains the original reviewed content hashes and checks them again when executing. Changes between review and enqueue, redirected parent paths outside the compared roots, newly occupied destinations (including dangling symlinks), and added children in a reviewed empty folder require another comparison.
+
 ## Send to Nearby Mac
 
 Nearby Share is off by default; turn it on in **Settings → General** on both Macs. While it is on, this Mac is visible to other FinderPlus Macs on the network, and sender names are not verified. Select files and choose **File → Send to Nearby Mac…** (or the context menu) to send them straight to another Mac running FinderPlus on the same local network, similar to Spacedrive's Spacedrop. Peers are found over Bonjour; the receiver must accept each request, and accepted files are saved to Downloads under a new name if one already exists, with the macOS quarantine flag set like AirDrop. Folders must be compressed first. Transfers use plain TCP and are **not encrypted**—use them only on networks you trust.
+
+Incoming batches stay in hidden staging until every file arrives. Interrupted or cancelled transfers remove their unpublished data; turning Nearby Share off cancels active transfer tasks as well as discovery. A lost final acknowledgement does not turn already-saved files into a receiver-side failure.
 
 ## Cloud folders and privacy
 
@@ -93,5 +101,11 @@ The app follows macOS filesystem permissions. It does not grant itself Full Disk
 Verified on this Apple Silicon Mac running macOS 27: release build, code-signature verification and the full self-check passed. Native UI checks covered the three example natural-language queries, all four views, pane tabs, repeated Gallery split/collapse, native text editing, auxiliary-window closing, comparison of missing versus identical files, settings, and an actual file copy followed by Undo. Copied bytes and the final on-disk state were checked separately. All smoke fixtures were disposable.
 
 Folder-creation checks also exercised the toolbar, empty-folder action, File menu, keyboard shortcut, all four views, targeting an inactive split pane, and Undo. Eight temporary directories were checked on disk. Automated right-click-menu verification was inconclusive; foreground approval was not received. Regression checks reject occupied names and path traversal without replacing existing files.
+
+The audit regression suite additionally covers failed Back/Forward navigation, deterministic sorting of equal-name search results, tab-history preservation when moving panes, malformed queries, special-file read rejection, privacy revocation and bookmark failures, atomic folder grouping, Redo preservation, stale queued synchronization, and interrupted loopback transfers. The release build and full self-check passed, including a real cross-disk move using a disposable RAM disk and loopback transfer quarantine/no-overwrite checks.
+
+The audited build was installed in `/Applications` and checked through its native UI: malformed search returned no unrelated file, New Folder with Selection completed as one job and one Undo restored the original bytes while removing its folder, and moving an inactive tab selected the correct tab and preserved Back/Forward history. Back/Forward failures leave history intact, and size/kind/date sorting uses paths to break equal-name ties.
+
+Residual boundary: filesystem checks are path-based, so a different process can still change a path between validation and the final filesystem call. Multi-Mac sharing, live cloud providers, forced process termination during transfer, and every supported macOS release were not exercised by this audit.
 
 The interface uses the system appearance and native controls. It is not pixel-identical to the reference. Split arrangements and tabs persist; custom divider ratios and native window-tab group membership do not. Provider account behavior, removable-device failures, production-scale performance, live system Trash restoration and every supported macOS version require separate environment-specific testing before relying on the app for irreplaceable files.

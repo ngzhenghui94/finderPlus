@@ -188,17 +188,22 @@ struct OperationPlannedCopy: Sendable {
     let destination: URL
     let sourceSnapshot: OperationSnapshot
     let destinationSnapshot: OperationSnapshot?
-    init(source: URL, destination: URL) throws {
+    let reviewed: FolderComparison.Copy?
+    let allowCloudDownloads: Bool
+    init(source: URL, destination: URL, reviewed: FolderComparison.Copy? = nil, allowCloudDownloads: Bool = false) throws {
         guard let snapshot = try OperationSnapshot.capture(source) else { throw OperationFailure.message("Sync source no longer exists: \(source.path)") }
         self.source = source; self.destination = destination
         sourceSnapshot = snapshot
         destinationSnapshot = try OperationSnapshot.capture(destination)
+        self.reviewed = reviewed
+        self.allowCloudDownloads = allowCloudDownloads
     }
     func validate() throws {
         guard try OperationSnapshot.capture(source) == sourceSnapshot,
               try OperationSnapshot.capture(destination) == destinationSnapshot else {
             throw OperationFailure.message("A synchronization item changed after review. Refresh the comparison before trying again: \(destination.path)")
         }
+        if let reviewed { try reviewed.validate(allowCloudDownloads: allowCloudDownloads) }
     }
 }
 
@@ -206,7 +211,7 @@ enum OperationRequest: Sendable {
     case transfer([URL], URL, Bool)
     case duplicate([URL])
     case rename([(URL, String)])
-    case folder(URL, String)
+    case folder(URL, String, moving: [URL] = [])
     case trash([URL])
     case putBack([URL])
     case archive([URL], URL)
@@ -981,14 +986,13 @@ actor OperationsEngine {
             userPaths = urls + [parent]
         case .duplicate(let urls), .trash(let urls), .putBack(let urls): userPaths = urls
         case .rename(let changes): userPaths = changes.map { $0.0 }
-        case .folder(let parent, _): userPaths = [parent]
+        case .folder(let parent, _, let urls): userPaths = [parent] + urls
         case .synchronize(let copies): userPaths = copies.flatMap { [$0.source, $0.destination] }
         case .undo, .redo, .recover, .abandon, .clearHistory: userPaths = []
         }
         guard !userPaths.contains(where: { !ownedArtifactNames.isDisjoint(with: $0.pathComponents) }) else {
             throw OperationFailure.message("FinderPlus undo storage cannot be edited directly. Use Clear File Operation History to release it safely.")
         }
-        for index in journal.records.indices where journal.records[index].state == "undone" { journal.records[index].state = "superseded" }
         journal.records.append(OperationRecord(id: id, title: title))
         let record = journal.records.count - 1
         try persist()
@@ -1025,7 +1029,13 @@ actor OperationsEngine {
                     let destination = source.deletingLastPathComponent().appendingPathComponent(name)
                     if source.path != destination.path { try await move(source, destination, record: record, control: control) }
                 }
-            case .folder(let parent, let name): try await folder(parent, name, record: record, control: control)
+            case .folder(let parent, let name, let urls):
+                try await folder(parent, name, record: record, control: control)
+                let destination = parent.appendingPathComponent(name, isDirectory: true)
+                for source in urls {
+                    try await transfer(source, destination.appendingPathComponent(source.lastPathComponent), moving: true,
+                                       record: record, control: control, review: review, progress: progress)
+                }
             case .trash(let urls):
                 for source in urls { try await move(source, URL(fileURLWithPath: "/.FinderPlus-trash-" + UUID().uuidString), record: record, control: control, trash: true) }
             case .putBack(let urls):
@@ -1083,6 +1093,9 @@ actor OperationsEngine {
             }
             try await sealStorage()
             journal.records[record].state = journal.records[record].moves.isEmpty ? "cancelled" : "committed"
+            if journal.records[record].state == "committed" {
+                for index in journal.records.indices where journal.records[index].state == "undone" { journal.records[index].state = "superseded" }
+            }
             try persist()
             await progress(1, "Completed")
         } catch {

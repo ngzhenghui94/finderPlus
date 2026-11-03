@@ -50,6 +50,10 @@ extension NaturalQuery {
         _ = try file("package-secret.txt", directory: package)
         let pdf = root.appendingPathComponent("document.pdf")
         try makeSearchPDF(at: pdf, text: "cobalt meridian")
+        let pipe = root.appendingPathComponent("blocked.txt")
+        try requireSearch(mkfifo(pipe.path, 0o600) == 0, "cannot create temporary FIFO")
+        try requireSearch(!CloudLocations.isReadableLocally(pipe), "FIFO is not safe local content or preview input")
+        try requireSearch(CloudLocations.isReadableLocally(report) && CloudLocations.isReadableLocally(root), "ordinary local files and folders remain readable")
         let sources = try PropertyListSerialization.data(fromPropertyList: ["https://github.com/example/project/releases"], format: .binary, options: 0)
         let attributeResult = sources.withUnsafeBytes {
             setxattr(report.path, "com.apple.metadata:kMDItemWhereFroms", $0.baseAddress, sources.count, 0, XATTR_NOFOLLOW)
@@ -93,6 +97,13 @@ extension NaturalQuery {
         try requireSearch(!parse("NOT ext:txt", now: now).matches(reportEntry), "NOT predicate")
         try requireSearch(!parse("NOT", now: now).matches(reportEntry), "dangling exclusion fails closed")
         try requireSearch(!parse(") name:report", now: now).matches(reportEntry), "unmatched closing parenthesis does not broaden search")
+        let bareOr = parse("OR", now: now)
+        try requireSearch(bareOr.matches(reportEntry) && !bareOr.matches(movieEntry) && !bareOr.warnings.isEmpty, "bare OR matches only names containing the literal word")
+        for query in ["()", "NOT ()", "name:missing OR OR name:absent", "name:report OR", "(name:report"] {
+            let malformed = parse(query, now: now)
+            try requireSearch(!malformed.matches(reportEntry) && !malformed.warnings.isEmpty, "malformed boolean query stays literal: \(query)")
+        }
+        try requireSearch(parse("", now: now).matches(reportEntry), "empty query still enumerates the scope")
         try requireSearch(!parse("-ext:txt", now: now).matches(reportEntry), "minus exclusion")
         try requireSearch(!parse("-name:\"report.txt\"", now: now).matches(reportEntry), "quoted operator exclusion")
         try requireSearch(parse("ext:mov OR ext:txt AND name:report", now: now).matches(movieEntry), "AND precedence over OR")
@@ -106,6 +117,8 @@ extension NaturalQuery {
         try requireSearch(!parse("modified:2026-99-99", now: now).warnings.isEmpty, "invalid date warning")
         try requireSearch(!parse("size:999999999999999999999TB", now: now).warnings.isEmpty, "overflow size warning")
         try requireSearch(!parse("\"unfinished", now: now).warnings.isEmpty, "unclosed quote warning")
+        try requireSearch(!parse("unknown: report", now: now).matches(try FileEntry(url: file("unknown:.txt"))), "unknown operator keeps the next word as a required search term")
+        try requireSearch(!parse("size: invalid", now: now).matches(try FileEntry(url: file("size:.txt"))), "invalid operator keeps the next word as a required search term")
         let spaced = parse("screenshots   last   week", now: now)
         try requireSearch(spaced.filters.map(\.expression) == ["screenshots", "last   week"], "chips retain original whitespace")
         try requireSearch(parse("NOT   ext:txt", now: now).filters.first?.expression == "NOT   ext:txt", "exclusion chip retains NOT")
@@ -179,7 +192,43 @@ extension NaturalQuery {
         }
         let didCancel = await cancelled.value
         try requireSearch(didCancel, "cancelled searches stop before scanning")
+        try await checkSearchPreferences(root: root, base: base)
     }
+}
+
+@MainActor
+private func checkSearchPreferences(root: URL, base: URL) throws {
+    let suite = "FinderPlus-search-preferences-check-\(UUID().uuidString)"
+    guard let defaults = UserDefaults(suiteName: suite) else { throw OperationFailure.message("Search self-check: cannot isolate preferences") }
+    defer { defaults.removePersistentDomain(forName: suite) }
+    let preferences = AppPreferences(defaults: defaults)
+    preferences.searchRoots = [root]
+    try requireSearch(preferences.settingsError == nil, "temporary approved root can be bookmarked")
+    preferences.contentEnabled = true
+    preferences.ocrEnabled = true
+    let service = SearchService(preferences: preferences)
+    func start() {
+        service.search("name:report", roots: [root], includeHidden: false, contentEnabled: false, ocrEnabled: false)
+    }
+    start()
+    preferences.contentEnabled = false
+    try requireSearch(!service.isSearching && service.results.isEmpty, "text opt-out immediately cancels active search")
+    start()
+    preferences.ocrEnabled = false
+    try requireSearch(!service.isSearching && service.results.isEmpty, "OCR opt-out immediately cancels active search")
+    start()
+    preferences.searchRoots = []
+    try requireSearch(!service.isSearching && service.results.isEmpty, "root revocation immediately cancels active search")
+
+    let disappearing = base.appendingPathComponent("Disappearing", isDirectory: true)
+    try FileManager.default.createDirectory(at: disappearing, withIntermediateDirectories: false)
+    preferences.searchRoots = [root, disappearing]
+    try requireSearch(preferences.settingsError == nil, "temporary roots persist before removal")
+    try FileManager.default.removeItem(at: disappearing)
+    preferences.searchRoots = [disappearing]
+    try requireSearch(preferences.settingsError != nil, "missing root persistence failure is visible")
+    let restored = AppPreferences(defaults: defaults)
+    try requireSearch(!canonicalSearchURLs(restored.searchRoots).contains(canonicalSearchURLs([root])[0]), "another missing root cannot restore a revoked approval")
 }
 
 private func makeSearchPDF(at url: URL, text: String) throws {

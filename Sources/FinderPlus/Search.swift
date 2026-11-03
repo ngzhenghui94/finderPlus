@@ -78,6 +78,7 @@ private struct QueryParser {
     var index = 0
     var filters: [SearchFilter] = []
     var warnings: [String] = []
+    var invalidBoolean = false
     let now: Date
     let original: String
     var calendar = Calendar(identifier: .gregorian)
@@ -115,6 +116,9 @@ private struct QueryParser {
         var predicate = parseOr()
         if index < tokens.count {
             warnings.append("Unmatched closing parenthesis: this query is treated as a literal name.")
+            invalidBoolean = true
+        }
+        if invalidBoolean {
             predicate = .name(original)
             filters = [SearchFilter(label: "Literal name", expression: original)]
         }
@@ -132,12 +136,13 @@ private struct QueryParser {
         let filterStart = filters.count
         if isOperator("or") || isOperator("hoac") || isOperator("|") {
             warnings.append("OR needs a left-hand condition.")
+            invalidBoolean = true
             index += 1
         }
         var values = [parseAnd()]
         while isOperator("or") || isOperator("hoac") || isOperator("|") {
             index += 1
-            if index == tokens.count || isOperator(")") { warnings.append("OR needs a right-hand condition."); break }
+            if index == tokens.count || isOperator(")") { warnings.append("OR needs a right-hand condition."); invalidBoolean = true; break }
             values.append(parseAnd())
         }
         if values.count > 1 {
@@ -153,6 +158,10 @@ private struct QueryParser {
             if isOperator("and") || isOperator("va") || isOperator("&") { index += 1; continue }
             values.append(parseUnary())
         }
+        if values.isEmpty && !tokens.isEmpty {
+            warnings.append("Boolean group needs a condition; this query is treated as a literal name.")
+            invalidBoolean = true
+        }
         return .all(values)
     }
 
@@ -161,7 +170,9 @@ private struct QueryParser {
             let start = index
             let exclusionLength = phrase(["ngoai", "tru"]) ? 2 : 1
             index += exclusionLength
-            if index == tokens.count || isOperator(")") { warnings.append("Exclusion needs a condition."); return .any([]) }
+            if index == tokens.count || isOperator(")") || isOperator("or") || isOperator("hoac") || isOperator("|") {
+                warnings.append("Exclusion needs a condition."); invalidBoolean = true; return .any([])
+            }
             let filterStart = filters.count
             let result = parseUnary()
             // Keep NOT attached to its chip so removing a chip never leaves a dangling exclusion.
@@ -176,7 +187,7 @@ private struct QueryParser {
             let filterStart = filters.count
             index += 1
             let result = parseOr()
-            if isOperator(")") { index += 1 } else { warnings.append("Missing closing parenthesis.") }
+            if isOperator(")") { index += 1 } else { warnings.append("Missing closing parenthesis."); invalidBoolean = true }
             filters.removeSubrange(filterStart...)
             filters.append(SearchFilter(label: expression(start, index), expression: expression(start, index)))
             return result
@@ -220,11 +231,14 @@ private struct QueryParser {
             return nil
         }
         let key = searchFold(String(text[..<colon]))
+        let argumentStart = index
         var value = String(text[text.index(after: colon)...])
         if value.isEmpty, index < tokens.count, !isOperator(")") {
             value = tokens[index].value; index += 1
         }
-        guard !value.isEmpty else { warnings.append("Empty \(key): filter is treated as a literal name."); return nil }
+        guard !value.isEmpty else {
+            warnings.append("Empty \(key): filter is treated as a literal name."); index = argumentStart; return nil
+        }
         switch key {
         case "name", "ten": return .name(value)
         case "path", "duongdan": return .path(value)
@@ -262,6 +276,7 @@ private struct QueryParser {
             warnings.append("Invalid date '\(value)'. Use YYYY-MM-DD, today, yesterday, last-week or last-month.")
         default: warnings.append("Unknown operator '\(key):' is treated literally.")
         }
+        index = argumentStart
         return nil
     }
 
@@ -737,6 +752,17 @@ final class SearchService: ObservableObject {
     @Published var plan = NaturalQuery.parse("")
     private var task: Task<Void, Never>?
     private var generation = UUID()
+    private var privacyObservation: AnyCancellable?
+
+    init(preferences: AppPreferences) {
+        privacyObservation = Publishers.CombineLatest3(preferences.$searchRoots, preferences.$contentEnabled, preferences.$ocrEnabled)
+            .dropFirst()
+            .sink { [weak self] _ in
+                self?.cancel()
+                self?.results = []
+                Task { await LocalSearchIndex.shared.invalidateCache() }
+            }
+    }
 
     deinit { task?.cancel() }
 

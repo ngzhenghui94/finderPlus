@@ -114,7 +114,19 @@ final class FileOperations: ObservableObject {
         guard !changes.isEmpty else { return }
         enqueue(.rename(changes), title: changes.count == 1 ? "Rename \(changes[0].0.lastPathComponent)" : "Rename \(changes.count) items")
     }
-    func createFolder(in parent: URL, name: String) { enqueue(.folder(parent, name), title: "Create folder \(name)") }
+    func createFolder(in parent: URL, name: String, moving urls: [URL] = []) {
+        let normalized = Self.normalize(urls)
+        let request = OperationRequest.folder(parent, name, moving: normalized)
+        if CloudLocations.containsCloudItems(normalized) {
+            Task {
+                if await confirm(title: "Move files in cloud storage?", detail: "Moving these \(normalized.count) items into \(name) in \(parent.path) can remove them from their current cloud folder and your other devices. The provider controls synchronization.", action: "Move Files") {
+                    enqueue(request, title: "Create folder \(name) with selection")
+                }
+            }
+        } else {
+            enqueue(request, title: urls.isEmpty ? "Create folder \(name)" : "Create folder \(name) with selection")
+        }
+    }
     func compress(_ urls: [URL], in parent: URL) {
         guard !urls.isEmpty else { return }
         enqueue(.archive(Self.normalize(urls), parent), title: "Create ZIP archive")
@@ -123,12 +135,9 @@ final class FileOperations: ObservableObject {
         guard !urls.isEmpty else { return }
         enqueue(.alias(Self.normalize(urls), parent), title: "Create Finder aliases")
     }
-    func synchronize(_ copies: [(source: URL, destination: URL)]) {
+    func synchronize(_ copies: [OperationPlannedCopy]) {
         guard !copies.isEmpty else { return }
-        do {
-            let planned = try copies.map { try OperationPlannedCopy(source: $0.source, destination: $0.destination) }
-            enqueue(.synchronize(planned), title: "Synchronize \(copies.count) items")
-        } catch { problems.append(error.localizedDescription) }
+        enqueue(.synchronize(copies), title: "Synchronize \(copies.count) items")
     }
     func trash(_ urls: [URL]) {
         guard !urls.isEmpty else { return }
@@ -434,6 +443,31 @@ final class FileOperations: ObservableObject {
         try require(!fm.fileExists(atPath: root.appendingPathComponent("escaped").path), "folder name cannot escape its parent")
         try await run(.undo)
         try require(!fm.fileExists(atPath: destination.appendingPathComponent("Created").path), "folder undo")
+        let occupied = destination.appendingPathComponent("occupied")
+        try fm.createDirectory(at: occupied, withIntermediateDirectories: false)
+        for name in ["occupied", "../escaped"] {
+            var rejected = false
+            do { try await run(.folder(destination, name, moving: [file])) } catch { rejected = true }
+            try require(rejected && fm.fileExists(atPath: file.path) && !fm.fileExists(atPath: occupied.appendingPathComponent(file.lastPathComponent).path),
+                        "new folder with selection never moves files after failed creation")
+        }
+        let grouped = destination.appendingPathComponent("Grouped")
+        try await run(.folder(destination, "Grouped", moving: [file]))
+        try require(!fm.fileExists(atPath: file.path) && fm.fileExists(atPath: grouped.appendingPathComponent(file.lastPathComponent).path), "new folder includes selection")
+        try await run(.undo)
+        try require(fm.fileExists(atPath: file.path) && !fm.fileExists(atPath: grouped.path), "one undo restores selection and removes its folder")
+        try await run(.redo)
+        try require(fm.fileExists(atPath: grouped.appendingPathComponent(file.lastPathComponent).path), "one redo restores folder and selection")
+        try await run(.undo)
+        var groupingFailed = false
+        do { try await run(.folder(destination, "Failed Group", moving: [file, source.appendingPathComponent("missing")])) }
+        catch { groupingFailed = true }
+        try require(groupingFailed && fm.fileExists(atPath: file.path) && !fm.fileExists(atPath: destination.appendingPathComponent("Failed Group").path),
+                    "new folder rolls back earlier selected moves when a later move fails")
+        var descendantRefused = false
+        do { try await run(.folder(source, "Descendant", moving: [source])) } catch { descendantRefused = true }
+        try require(descendantRefused && fm.fileExists(atPath: file.path) && !fm.fileExists(atPath: source.appendingPathComponent("Descendant").path),
+                    "new folder refuses moving its parent into itself")
         let nested = destination.appendingPathComponent("new/child/sample.txt")
         try await run(.synchronize([try OperationPlannedCopy(source: file, destination: nested)]))
         try require(try Data(contentsOf: nested) == Data(contentsOf: file), "sync creates missing parents")
@@ -559,6 +593,41 @@ final class FileOperations: ObservableObject {
         var staleRefused = false
         do { try plan.validate() } catch { staleRefused = true }
         try require(staleRefused && !fm.fileExists(atPath: staleTarget.path), "sync detects changed reviewed source")
+        let redoEngine = OperationsEngine(directory: root.appendingPathComponent("redo-journal"))
+        func redoRun(_ request: OperationRequest) async throws {
+            try await redoEngine.execute(request, id: UUID(), title: "Redo preservation fixture", control: OperationControl(), review: keep, progress: progress)
+        }
+        let redoFolder = root.appendingPathComponent("Redo preserved")
+        try await redoRun(.folder(root, redoFolder.lastPathComponent))
+        try await redoRun(.undo)
+        var invalidFolderRefused = false
+        do { try await redoRun(.folder(root, "../invalid")) } catch { invalidFolderRefused = true }
+        try await redoRun(.rename([(file, file.lastPathComponent)]))
+        try await redoRun(.redo)
+        try require(invalidFolderRefused && fm.fileExists(atPath: redoFolder.path), "failed and no-op requests preserve redo")
+        try await redoRun(.undo)
+        try await redoRun(.folder(root, "Redo replacement"))
+        let redoStatus = await redoEngine.status()
+        try require(!redoStatus.1, "a committed new operation still supersedes redo")
+        let syncLeft = root.appendingPathComponent("review-left"), syncRight = root.appendingPathComponent("review-right")
+        try fm.createDirectory(at: syncLeft, withIntermediateDirectories: false)
+        try fm.createDirectory(at: syncRight, withIntermediateDirectories: false)
+        let reviewedSource = syncLeft.appendingPathComponent("file"), reviewedTarget = syncRight.appendingPathComponent("file")
+        for editSource in [true, false] {
+            try Data("left".utf8).write(to: reviewedSource)
+            try Data("rite".utf8).write(to: reviewedTarget)
+            let comparison = try FolderComparison.compare(left: syncLeft, right: syncRight)
+            let reviewed = try comparison.copies(selected: ["file"], direction: .leftToRight)
+            try comparison.validate(reviewed)
+            // A task can yield between review validation and enqueue. New metadata is not new consent.
+            try Data("edit".utf8).write(to: editSource ? reviewedSource : reviewedTarget)
+            let queued = try reviewed.map { try OperationPlannedCopy(source: $0.source, destination: $0.destination, reviewed: $0) }
+            var reviewRefused = false
+            do { try await run(.synchronize(queued)) } catch { reviewRefused = true }
+            let reviewedContents = try Data(contentsOf: reviewedTarget)
+            try require(reviewRefused && reviewedContents == Data((editSource ? "rite" : "edit").utf8),
+                        "sync retains source and destination review snapshots across enqueue")
+        }
         let restoreRoot = root.appendingPathComponent("simulated-trash")
         try fm.createDirectory(at: restoreRoot, withIntermediateDirectories: false)
         let original = restoreRoot.appendingPathComponent("original")

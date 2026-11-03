@@ -81,7 +81,9 @@ import UniformTypeIdentifiers
     func activate(_ pane: BrowserPane) { if activeID != pane.id { activeID = pane.id; persist() } }
     func split(vertical: Bool, before: Bool = false, moveTab: Bool = false) {
         guard panes.count < 16 else { explain("A window supports up to 16 panes."); return }
-        let pane = BrowserPane(url: active.url); pane.mode = active.mode
+        guard let tab = active.tabs.first(where: { $0.id == active.activeTab }) else { return }
+        let pane = moveTab ? BrowserPane(snapshot: PaneSnapshot(id: UUID(), tabs: [tab], activeTab: tab.id)) : BrowserPane(url: active.url)
+        if !moveTab { pane.mode = active.mode }
         if moveTab && active.tabs.count > 1 { active.closeTab(active.activeTab) }
         pane.changed = { [weak self] in self?.persist() }; pane.load()
         layout = layout.splitting(activeID, with: pane.id, vertical: vertical, before: before)
@@ -116,12 +118,7 @@ import UniformTypeIdentifiers
         let parent = active.url
         let selected = withSelection ? active.selected : []
         guard let name = prompt("New Folder", message: "Create a folder in:\n\(parent.path)", value: "Untitled Folder", action: "Create") else { return }
-        if withSelection {
-            let destination = parent.appendingPathComponent(name)
-            guard !FileManager.default.fileExists(atPath: destination.path) else { explain("A folder with this name already exists."); return }
-            FileOperations.shared.createFolder(in: parent, name: name)
-            FileOperations.shared.copy(selected, to: destination, move: true)
-        } else { FileOperations.shared.createFolder(in: parent, name: name) }
+        FileOperations.shared.createFolder(in: parent, name: name, moving: selected)
     }
     func copy(cut: Bool = false, path: Bool = false) {
         let urls = active.selected

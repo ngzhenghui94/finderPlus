@@ -69,6 +69,57 @@ import Foundation
         let bySize = pane.shown.filter { !$0.isDirectory }.map(\.name)
         pane.filter = "b"
         guard byName.contains("a.txt"), bySize == ["b.txt", "c.txt", "a.txt"], pane.shown.map(\.name) == ["b.txt"] else { throw CocoaError(.validationStringTooLong) }
+        var auditFailures: [String] = []
+        let duplicateName = try file("folder/a.txt", bytes: 10, daysAgo: 0)
+        pane.filter = ""
+        let ties = [entries[0], duplicateName]
+        for key in ["Size", "Kind", "Modified"] {
+            pane.sortKey = key
+            for ascending in [true, false] {
+                pane.ascending = ascending
+                if pane.sorted(ties).map(\.id) != pane.sorted(Array(ties.reversed())).map(\.id) {
+                    auditFailures.append("\(key) sorting depends on input order for equal names")
+                }
+            }
+        }
+        let missing = root.appendingPathComponent("temporarily-unavailable")
+        for backward in [true, false] {
+            let tab = BrowserTab(url: root, back: backward ? [missing] : [], forward: backward ? [] : [missing])
+            let historyPane = BrowserPane(snapshot: PaneSnapshot(id: UUID(), tabs: [tab], activeTab: tab.id))
+            historyPane.history(backward)
+            if historyPane.url != root || historyPane.tabs[0].back != tab.back || historyPane.tabs[0].forward != tab.forward {
+                auditFailures.append("Failed \(backward ? "Back" : "Forward") changes navigation history")
+            }
+            try FileManager.default.createDirectory(at: missing, withIntermediateDirectories: false)
+            historyPane.history(backward)
+            if historyPane.url.standardizedFileURL != missing.standardizedFileURL {
+                auditFailures.append("Restored folder cannot be reached by retrying history")
+            }
+            historyPane.history(!backward)
+            if historyPane.url.standardizedFileURL != root.standardizedFileURL {
+                auditFailures.append("Successful history navigation loses the return path")
+            }
+            try FileManager.default.removeItem(at: missing)
+        }
+        guard auditFailures.isEmpty else { throw OperationFailure.message(auditFailures.joined(separator: "; ")) }
+        let defaults = UserDefaults.standard
+        let oldRecent = defaults.object(forKey: "recentFolders")
+        let wasRestoring = AppDelegate.shared.restoringWindows
+        AppDelegate.shared.restoringWindows = true
+        defer {
+            defaults.set(oldRecent, forKey: "recentFolders")
+            AppDelegate.shared.restoringWindows = wasRestoring
+        }
+        let sourceTab = BrowserTab(url: root)
+        let movingTab = BrowserTab(url: root.appendingPathComponent("folder"), mode: .gallery, back: [root], forward: [])
+        let paneID = UUID()
+        let workspace = Workspace(snapshot: WorkspaceSnapshot(layout: .leaf(paneID), panes: [PaneSnapshot(id: paneID, tabs: [sourceTab, movingTab], activeTab: movingTab.id)], active: paneID))
+        workspace.split(vertical: true, moveTab: true)
+        guard workspace.panes.count == 2, workspace.panes[0].tabs.map(\.id) == [sourceTab.id],
+              workspace.active.tabs.first?.id == movingTab.id, workspace.active.mode == .gallery,
+              workspace.active.tabs.first?.back == [root] else {
+            throw OperationFailure.message("Moving a tab must preserve its view and navigation history")
+        }
         var job = TransferJob(id: UUID(), title: "Copy")
         job.copiedBytes = 500_000_000; job.totalBytes = 1_000_000_000; job.bytesPerSecond = 100_000_000
         guard job.transferStats.contains("500 MB of 1 GB"), job.transferStats.contains("/s"), job.transferStats.contains("left") else { throw CocoaError(.validationNumberTooLarge) }

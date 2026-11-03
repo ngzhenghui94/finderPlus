@@ -171,7 +171,7 @@ struct SavedSearch: Identifiable, Codable {
     @Published var ascending = true { didSet { shownCache = nil } }
     @Published var columnFolders: [URL] = []
     @Published var columnEntries: [[FileEntry]] = []
-    let search = SearchService()
+    let search = SearchService(preferences: .shared)
     private var generation = UUID()
     private var watcher: DispatchSourceFileSystemObject?
     private var reloadTimer: Timer?
@@ -250,9 +250,9 @@ struct SavedSearch: Identifiable, Codable {
             if AppPreferences.shared.foldersFirst && $0.isDirectory != $1.isDirectory { return $0.isDirectory }
             let less: Bool
             switch sortKey {
-            case "Modified": less = $0.modified == $1.modified ? $0.name < $1.name : $0.modified < $1.modified
-            case "Size": less = $0.size == $1.size ? $0.name < $1.name : $0.size < $1.size
-            case "Kind": less = $0.kind == $1.kind ? $0.name < $1.name : $0.kind < $1.kind
+            case "Modified": less = $0.modified == $1.modified ? ($0.name, $0.id) < ($1.name, $1.id) : $0.modified < $1.modified
+            case "Size": less = $0.size == $1.size ? ($0.name, $0.id) < ($1.name, $1.id) : $0.size < $1.size
+            case "Kind": less = $0.kind == $1.kind ? ($0.name, $0.id) < ($1.name, $1.id) : $0.kind < $1.kind
             default:
                 let order = $0.name.localizedStandardCompare($1.name)
                 less = order == .orderedSame ? $0.id < $1.id : order == .orderedAscending
@@ -260,19 +260,23 @@ struct SavedSearch: Identifiable, Codable {
             return ascending ? less : !less && $0.id != $1.id
         }
     }
-    func navigate(_ target: URL, record: Bool = true) {
+    @discardableResult func navigate(_ target: URL, record: Bool = true) -> Bool {
         var directory: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: target.path, isDirectory: &directory), directory.boolValue else { error = "This folder is unavailable: \(target.path)"; return }
-        guard let index = tabs.firstIndex(where: { $0.id == activeTab }) else { return }
+        guard FileManager.default.fileExists(atPath: target.path, isDirectory: &directory), directory.boolValue else { error = "This folder is unavailable: \(target.path)"; return false }
+        guard let index = tabs.firstIndex(where: { $0.id == activeTab }) else { return false }
         if record && target != url { tabs[index].back.append(url); tabs[index].forward = [] }
         tabs[index].url = target.standardizedFileURL
         query = ""; filter = ""; selection = []; savedSearchRoots = nil; search.cancel()
-        load(); changed?()
+        load(); if record { changed?() }; return true
     }
     func history(_ backward: Bool) {
         guard let i = tabs.firstIndex(where: { $0.id == activeTab }) else { return }
-        if backward, let next = tabs[i].back.popLast() { tabs[i].forward.append(url); navigate(next, record: false) }
-        else if !backward, let next = tabs[i].forward.popLast() { tabs[i].back.append(url); navigate(next, record: false) }
+        let previous = url
+        if backward, let next = tabs[i].back.last, navigate(next, record: false) {
+            tabs[i].back.removeLast(); tabs[i].forward.append(previous); changed?()
+        } else if !backward, let next = tabs[i].forward.last, navigate(next, record: false) {
+            tabs[i].forward.removeLast(); tabs[i].back.append(previous); changed?()
+        }
     }
     func newTab(_ target: URL? = nil) {
         let tab = BrowserTab(url: target ?? url, mode: mode)

@@ -50,15 +50,17 @@ final class AppPreferences: ObservableObject {
 
     private func persistRoots() {
         var bookmarks: [Data] = []
-        do {
-            for url in searchRoots {
+        var failures: [String] = []
+        for url in searchRoots {
+            do {
                 bookmarks.append(try url.bookmarkData(options: [.withSecurityScope], includingResourceValuesForKeys: nil, relativeTo: nil))
-            }
-            defaults.set(bookmarks, forKey: "searchRootBookmarks")
-            for root in scopedRoots { root.stopAccessingSecurityScopedResource() }
-            scopedRoots = searchRoots.filter { $0.startAccessingSecurityScopedResource() }
-            settingsError = nil
-        } catch { settingsError = "Could not save approved search folders: \(error.localizedDescription)" }
+            } catch { failures.append("Could not save approved search folder \(url.path): \(error.localizedDescription)") }
+        }
+        // A missing remaining folder must never restore a removed approval on the next launch.
+        defaults.set(bookmarks, forKey: "searchRootBookmarks")
+        for root in scopedRoots { root.stopAccessingSecurityScopedResource() }
+        scopedRoots = searchRoots.filter { $0.startAccessingSecurityScopedResource() }
+        settingsError = failures.isEmpty ? nil : failures.joined(separator: "\n")
     }
 
     func approveSearchRoots() {

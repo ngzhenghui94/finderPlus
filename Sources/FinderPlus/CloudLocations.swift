@@ -39,10 +39,12 @@ enum CloudLocations {
     /// Darwin's SF_DATALESS marks File Provider / iCloud placeholders; reading one would download it.
     static func isPlaceholder(_ info: stat) -> Bool { info.st_flags & UInt32(SF_DATALESS) != 0 }
 
-    /// An item on disk that is neither a symlink nor a cloud placeholder, so reading it stays local.
+    /// Only ordinary files and folders can be read locally; pipes/devices can block or have side effects.
     static func isReadableLocally(_ url: URL) -> Bool {
         var info = stat()
-        return lstat(url.path, &info) == 0 && !isPlaceholder(info) && info.st_mode & S_IFMT != S_IFLNK
+        guard lstat(url.path, &info) == 0, !isPlaceholder(info) else { return false }
+        let type = info.st_mode & S_IFMT
+        return type == S_IFREG || type == S_IFDIR
     }
 
     static func isProviderURL(_ url: URL) -> Bool {

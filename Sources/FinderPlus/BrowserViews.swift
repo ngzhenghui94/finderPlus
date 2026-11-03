@@ -163,7 +163,7 @@ struct PaneView: View {
                             .background(tab.id == pane.activeTab ? Color(nsColor: .textBackgroundColor) : Color.clear)
                             .overlay(alignment: .top) { if tab.id == pane.activeTab && workspace.activeID == pane.id { Rectangle().fill(Color.accentColor).frame(height: 2) } }
                             .contentShape(Rectangle()).onTapGesture { workspace.activate(pane); pane.selectTab(tab.id) }
-                            .contextMenu { Button("Close Tab") { pane.closeTab(tab.id) }; Button("Move Tab to New Pane") { workspace.activate(pane); workspace.split(vertical: true, moveTab: true) } }
+                            .contextMenu { Button("Close Tab") { pane.closeTab(tab.id) }; Button("Move Tab to New Pane") { workspace.activate(pane); pane.selectTab(tab.id); workspace.split(vertical: true, moveTab: true) } }
                     }
                 }
             }

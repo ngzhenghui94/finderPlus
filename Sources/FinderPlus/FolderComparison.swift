@@ -11,7 +11,7 @@ struct FolderComparison {
         var id: String { path }
         var canCopy: Bool { kind != .equal && kind != .typeConflict && left?.isSymlink != true && right?.isSymlink != true }
     }
-    struct Snapshot: Equatable {
+    struct Snapshot: Equatable, Sendable {
         let url: URL
         let isDirectory: Bool
         let isSymlink: Bool
@@ -21,6 +21,7 @@ struct FolderComparison {
 
         init(_ url: URL, allowCloudDownloads: Bool) throws {
             self.url = url
+            let url = URL(fileURLWithPath: url.path) // Read fresh metadata, not cached resource values from enumeration.
             let values = try url.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey, .isRegularFileKey, .fileSizeKey, .contentModificationDateKey, .isUbiquitousItemKey, .ubiquitousItemDownloadingStatusKey])
             isSymlink = values.isSymbolicLink == true
             isDirectory = values.isDirectory == true && !isSymlink
@@ -39,7 +40,7 @@ struct FolderComparison {
                     hash.update(data: data)
                 }
                 digest = Data(hash.finalize())
-                let after = try url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
+                let after = try URL(fileURLWithPath: url.path).resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
                 guard after.fileSize == values.fileSize, after.contentModificationDate == values.contentModificationDate else { throw OperationFailure.message("File changed during comparison: \(url.path)") }
             } else if isSymlink {
                 digest = Data(try FileManager.default.destinationOfSymbolicLink(atPath: url.path).utf8)
@@ -104,12 +105,35 @@ struct FolderComparison {
     }
 
     enum Direction: String, CaseIterable { case leftToRight = "Left → Right", rightToLeft = "Right → Left", both = "Both ways (newer wins)" }
-    struct Copy: Identifiable {
+    struct Copy: Identifiable, Sendable {
         let source: URL
         let destination: URL
         let sourceSnapshot: Snapshot
         let destinationSnapshot: Snapshot?
+        let sourceRoot: URL
+        let destinationRoot: URL
         var id: String { destination.path }
+
+        func validate(allowCloudDownloads: Bool) throws {
+            for (url, root) in [(source, sourceRoot), (destination, destinationRoot)] {
+                let parent = url.deletingLastPathComponent().resolvingSymlinksInPath().standardizedFileURL.path
+                guard parent == root.path || parent.hasPrefix(root.path + "/") else {
+                    throw OperationFailure.message("A comparison path now leaves its reviewed folder: \(url.path). Compare again.")
+                }
+            }
+            let current = try Snapshot(source, allowCloudDownloads: allowCloudDownloads)
+            guard current == sourceSnapshot else { throw OperationFailure.message("Source changed since review: \(source.path). Compare again.") }
+            if current.isDirectory {
+                guard try FileManager.default.contentsOfDirectory(atPath: source.path).isEmpty else {
+                    throw OperationFailure.message("A reviewed empty folder now contains items: \(source.path). Compare again.")
+                }
+            }
+            if let expected = destinationSnapshot {
+                guard try Snapshot(destination, allowCloudDownloads: allowCloudDownloads) == expected else { throw OperationFailure.message("Destination changed since review: \(destination.path). Compare again.") }
+            } else {
+                guard try OperationSnapshot.capture(destination) == nil else { throw OperationFailure.message("Destination appeared since review: \(destination.path). Compare again.") }
+            }
+        }
     }
 
     func copies(selected: Set<String>, direction: Direction) throws -> [Copy] {
@@ -133,21 +157,14 @@ struct FolderComparison {
             if source.isDirectory && folders.contains(item.path) { continue }
             let destination = (useLeft ? right : left).appendingPathComponent(item.path, isDirectory: source.isDirectory)
             let existing = useLeft ? item.right : item.left
-            result.append(Copy(source: source.url, destination: destination, sourceSnapshot: source, destinationSnapshot: existing))
+            result.append(Copy(source: source.url, destination: destination, sourceSnapshot: source, destinationSnapshot: existing,
+                               sourceRoot: useLeft ? left : right, destinationRoot: useLeft ? right : left))
         }
         return result.sorted { $0.destination.path < $1.destination.path }
     }
 
     func validate(_ copies: [Copy]) throws {
-        for copy in copies {
-            let current = try Snapshot(copy.source, allowCloudDownloads: allowCloudDownloads)
-            guard current == copy.sourceSnapshot else { throw OperationFailure.message("Source changed since review: \(copy.source.path). Compare again.") }
-            if let expected = copy.destinationSnapshot {
-                guard try Snapshot(copy.destination, allowCloudDownloads: allowCloudDownloads) == expected else { throw OperationFailure.message("Destination changed since review: \(copy.destination.path). Compare again.") }
-            } else {
-                guard !FileManager.default.fileExists(atPath: copy.destination.path) else { throw OperationFailure.message("Destination appeared since review: \(copy.destination.path). Compare again.") }
-            }
-        }
+        for copy in copies { try copy.validate(allowCloudDownloads: allowCloudDownloads) }
     }
 
     static func selfCheck() throws {
@@ -180,7 +197,40 @@ struct FolderComparison {
         guard copies.count == 2 else { throw OperationFailure.message("Directory deduplication self-check failed") }
         try comparison.validate(copies)
         try Data("edited".utf8).write(to: right.appendingPathComponent("changed"))
-        do { try comparison.validate(copies) } catch { return }
-        throw OperationFailure.message("Stale comparison self-check failed")
+        var staleRefused = false
+        do { try comparison.validate(copies) } catch { staleRefused = true }
+        guard staleRefused else { throw OperationFailure.message("Stale comparison self-check failed") }
+        let emptySource = left.appendingPathComponent("reviewed-empty")
+        try fm.createDirectory(at: emptySource, withIntermediateDirectories: false)
+        let emptyComparison = try compare(left: left, right: right)
+        let emptyCopies = try emptyComparison.copies(selected: ["reviewed-empty"], direction: .leftToRight)
+        try emptyComparison.validate(emptyCopies)
+        try Data("not reviewed".utf8).write(to: emptySource.appendingPathComponent("new-child"))
+        guard let emptyCopy = emptyCopies.first else { throw OperationFailure.message("Missing empty-folder fixture") }
+        let emptyPlan = try OperationPlannedCopy(source: emptyCopy.source, destination: emptyCopy.destination, reviewed: emptyCopy)
+        var childRefused = false
+        do { try emptyPlan.validate() } catch { childRefused = true }
+        guard childRefused else { throw OperationFailure.message("Sync accepted unreviewed folder descendants") }
+        let escapeLeft = base.appendingPathComponent("escape-left"), escapeRight = base.appendingPathComponent("escape-right")
+        let outside = base.appendingPathComponent("outside")
+        try fm.createDirectory(at: escapeLeft.appendingPathComponent("sub/deep"), withIntermediateDirectories: true)
+        try fm.createDirectory(at: escapeRight.appendingPathComponent("sub/deep"), withIntermediateDirectories: true)
+        try fm.createDirectory(at: outside.appendingPathComponent("deep"), withIntermediateDirectories: true)
+        try Data("reviewed".utf8).write(to: escapeLeft.appendingPathComponent("sub/deep/file"))
+        let escapeComparison = try compare(left: escapeLeft, right: escapeRight)
+        let escapeCopies = try escapeComparison.copies(selected: ["sub/deep/file"], direction: .leftToRight)
+        try fm.moveItem(at: escapeRight.appendingPathComponent("sub"), to: base.appendingPathComponent("original-sub"))
+        try fm.createSymbolicLink(at: escapeRight.appendingPathComponent("sub"), withDestinationURL: outside)
+        var escapeRefused = false
+        do { try escapeComparison.validate(escapeCopies) } catch { escapeRefused = true }
+        guard escapeRefused && !fm.fileExists(atPath: outside.appendingPathComponent("deep/file").path) else {
+            throw OperationFailure.message("Comparison accepted a destination parent redirected outside its root")
+        }
+        let dangling = right.appendingPathComponent("nested/new")
+        try fm.createDirectory(at: dangling.deletingLastPathComponent(), withIntermediateDirectories: false)
+        try fm.createSymbolicLink(atPath: dangling.path, withDestinationPath: base.appendingPathComponent("missing-target").path)
+        var danglingRefused = false
+        do { try comparison.validate(copies.filter { $0.destination == dangling }) } catch { danglingRefused = true }
+        guard danglingRefused else { throw OperationFailure.message("Comparison accepted a newly appeared dangling symlink") }
     }
 }
