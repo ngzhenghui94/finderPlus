@@ -13,6 +13,8 @@ import Foundation
         guard fuzzyScore("dwn", "Downloads") == 1, fuzzyScore("down", "Downloads") == 3, fuzzyScore("load", "Downloads") == 2, fuzzyScore("xyz", "Downloads") == nil,
               ranked(["d-o-w-n", "xdown", "Downloads", "Desktop"], by: { fuzzyScore("down", $0) }) == ["Downloads", "xdown", "d-o-w-n"] else { throw CocoaError(.validationStringPatternMatching) }
         guard explainFailure(CocoaError(.fileWriteOutOfSpace)).contains("disk is full"), explainFailure(NSError(domain: NSPOSIXErrorDomain, code: Int(EACCES))).contains("Get Info") else { throw CocoaError(.validationInvalidDate) }
+        guard folderGlyph(named: "Photos") == "photo", folderGlyph(named: "Tax Reports 2025") == "dollarsign.circle", folderGlyph(named: "my_videos") == "film",
+              folderGlyph(named: "Happy") == nil, folderGlyph(named: "Apps") == nil else { throw CocoaError(.validationInvalidDate) }
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("FinderPlus-browser-check-" + UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root.appendingPathComponent("folder"), withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }

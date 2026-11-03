@@ -376,6 +376,7 @@ struct FileIcon: View {
     @State private var thumbnail: NSImage?
     var body: some View {
         Image(nsImage: thumbnail ?? NSWorkspace.shared.icon(forFile: url.path)).resizable().interpolation(.high).aspectRatio(contentMode: .fit).frame(width: size, height: size).accessibilityHidden(true)
+            .overlay { if let glyph = folderGlyph(for: url) { Image(systemName: glyph).font(.system(size: size * 0.32, weight: .semibold)).foregroundStyle(.black.opacity(0.3)).offset(y: size * 0.06) } }
             .task(id: "\(url.path)-\(size)") {
                 guard size > 32, localPreviewAllowed(url) else { return }
                 let request = QLThumbnailGenerator.Request(fileAt: url, size: CGSize(width: size, height: size), scale: 2, representationTypes: .thumbnail)
@@ -383,6 +384,36 @@ struct FileIcon: View {
                 catch { thumbnail = nil }
             }
     }
+}
+/// SF Symbol for a plain folder whose name suggests its contents, like the glyphs on macOS's own Downloads or Pictures folders.
+private let folderGlyphs: [(String, Set<String>)] = [
+    ("photo", ["photo", "picture", "pic", "image", "img", "screenshot", "wallpaper", "camera"]),
+    ("film", ["video", "movie", "film", "clip", "recording"]),
+    ("music.note", ["music", "audio", "song", "podcast", "sound"]),
+    ("arrow.down.circle", ["download"]),
+    ("dollarsign.circle", ["invoice", "receipt", "finance", "tax", "taxes", "bank", "budget", "money"]),
+    ("chevron.left.forwardslash.chevron.right", ["code", "src", "source", "dev", "developer", "repo", "git", "github"]),
+    ("archivebox", ["backup", "archive"]),
+    ("book", ["book", "ebook", "reading"]),
+    ("graduationcap", ["school", "homework", "class", "course", "study", "university"]),
+    ("briefcase", ["work", "office", "business", "client"]),
+    ("airplane", ["travel", "trip", "vacation", "holiday"]),
+    ("gamecontroller", ["game", "gaming"]),
+    ("paintbrush", ["design", "art", "drawing", "sketch", "font"]),
+    ("lock", ["private", "secret", "password", "key"]),
+    ("doc.text", ["document", "doc", "report", "paper", "note", "letter", "contract"]),
+]
+func folderGlyph(named name: String) -> String? {
+    let words = name.lowercased().split { !$0.isLetter }.map(String.init)
+    return folderGlyphs.first { _, keys in words.contains { keys.contains($0) || ($0.hasSuffix("s") && keys.contains(String($0.dropLast()))) } }?.0
+}
+// macOS already draws glyphs on these folders.
+private let systemGlyphFolders = Set([FileManager.SearchPathDirectory.desktopDirectory, .documentDirectory, .downloadsDirectory, .moviesDirectory, .musicDirectory, .picturesDirectory, .applicationDirectory, .libraryDirectory, .developerDirectory, .sharedPublicDirectory]
+    .flatMap { FileManager.default.urls(for: $0, in: [.userDomainMask, .localDomainMask]) }.map(\.standardizedFileURL.path))
+private func folderGlyph(for url: URL) -> String? {
+    guard let glyph = folderGlyph(named: url.lastPathComponent), !systemGlyphFolders.contains(url.standardizedFileURL.path),
+          let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .isPackageKey]), values.isDirectory == true, values.isPackage != true else { return nil }
+    return glyph
 }
 struct QuickPreview: NSViewRepresentable {
     let url: URL
