@@ -11,7 +11,7 @@ Requires the Xcode command-line tools and Swift 6. No third-party packages or AP
 ./dist/FinderPlus.app/Contents/MacOS/FinderPlus --self-check
 ```
 
-The build produces an ad-hoc-signed `dist/FinderPlus.app`. Copy it to `/Applications` and open it normally. This local build is not notarized for public distribution.
+`./build.sh` produces an ad-hoc-signed local build. The delivered `dist/FinderPlus.zip` and `/Applications/FinderPlus.app` are Developer ID–signed with hardened runtime, Apple-notarized, and stapled; the installed app passed Gatekeeper assessment. Rebuilding replaces that signed bundle, so a rebuilt app must be signed and notarized again before distribution.
 
 ## Browsing
 
@@ -21,6 +21,7 @@ The build produces an ad-hoc-signed `dist/FinderPlus.app`. Copy it to `/Applicat
 - Back/forward history (mouse side buttons and trackpad swipes act on the pane under the pointer), breadcrumbs, Go to Folder, fuzzy Quick Open, command palette, type-to-select, hidden files, sorting and current-folder filtering.
 - Favorites and sidebar groups, saved searches, mounted volumes, network locations, Finder/AirDrop handoffs, and a Shelf for gathering file references across folders.
 - Finder, Explorer and Total Commander keyboard profiles; editable shortcuts with validated import/export.
+- Create folders with the visible **New Folder** toolbar control, **Create New Folder…** in an empty folder, **File → New Folder…**, or the folder context menu. The dialog identifies the destination and uses an explicit **Create** action.
 
 Common default shortcuts:
 
@@ -33,6 +34,7 @@ Common default shortcuts:
 | Command palette | Control-Command-Shift-P |
 | New native window tab | Command-T |
 | New pane tab | Control-Option-Command-T |
+| New folder | Command-Shift-N |
 | Split pane | Control-Option-Command-arrow |
 | Zoom pane | Shift-Command-Return |
 | Copy / Paste | Command-C / Command-V |
@@ -89,5 +91,7 @@ The app follows macOS filesystem permissions. It does not grant itself Full Disk
 `--self-check` uses disposable temporary fixtures for search parsing and real extraction, scope/cancellation/cache behavior, recursive pane/session invariants, SHA-256 comparison and stale-review rejection, batch rename validation, and file-operation conflict/undo/recovery paths. It does not operate on the user's real documents or empty Trash.
 
 Verified on this Apple Silicon Mac running macOS 27: release build, code-signature verification and the full self-check passed. Native UI checks covered the three example natural-language queries, all four views, pane tabs, repeated Gallery split/collapse, native text editing, auxiliary-window closing, comparison of missing versus identical files, settings, and an actual file copy followed by Undo. Copied bytes and the final on-disk state were checked separately. All smoke fixtures were disposable.
+
+Folder-creation checks also exercised the toolbar, empty-folder action, File menu, keyboard shortcut, all four views, targeting an inactive split pane, and Undo. Eight temporary directories were checked on disk. Automated right-click-menu verification was inconclusive; foreground approval was not received. Regression checks reject occupied names and path traversal without replacing existing files.
 
 The interface uses the system appearance and native controls. It is not pixel-identical to the reference. Split arrangements and tabs persist; custom divider ratios and native window-tab group membership do not. Provider account behavior, removable-device failures, production-scale performance, live system Trash restoration and every supported macOS version require separate environment-specific testing before relying on the app for irreplaceable files.

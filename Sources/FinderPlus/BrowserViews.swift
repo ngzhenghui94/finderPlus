@@ -128,7 +128,7 @@ struct PaneView: View {
                     .contentShape(Rectangle())
                     .contextMenu { folderMenu }
                 if workspace.previewVisible, let path = pane.selection.sorted().first {
-                    FilePreview(entry: try? FileEntry(url: URL(fileURLWithPath: path))).frame(minWidth: 200, idealWidth: 260, maxWidth: 400)
+                    FilePreview(entry: try? FileEntry(url: URL(fileURLWithPath: path)), compact: true).frame(minWidth: 200, idealWidth: 260, maxWidth: 400)
                 }
             }
             if workspace.statusVisible {
@@ -172,7 +172,7 @@ struct PaneView: View {
         }.buttonStyle(.plain).foregroundStyle(.secondary).padding(.trailing, 9).background(Color(nsColor: .controlBackgroundColor))
     }
     var statusText: String {
-        let count = pane.shown.count
+        let count = pane.mode == .columns && pane.query.isEmpty ? (pane.columnEntries.last { $0.contains { pane.selection.contains($0.id) } } ?? pane.shown).count : pane.shown.count
         return pane.selection.isEmpty ? "\(count) item\(count == 1 ? "" : "s")" : "\(pane.selection.count) of \(count) selected"
     }
     var availableSpace: String { if let value = try? pane.url.resourceValues(forKeys: [.volumeAvailableCapacityKey]).volumeAvailableCapacity { return ByteCountFormatter.string(fromByteCount: Int64(value), countStyle: .file) + " available" }; return "" }
@@ -220,7 +220,10 @@ struct PaneView: View {
     var list: some View {
         Table(of: FileEntry.self, selection: $pane.selection) {
             TableColumn("Name") { item in
-                HStack(spacing: 6) { FileIcon(url: item.url, size: 18); Text(item.name).lineLimit(1); TagDots(tags: item.tags); cloud(item) }
+                HStack(spacing: 6) {
+                    FileIcon(url: item.url, size: 18); Text(item.name).lineLimit(1); TagDots(tags: item.tags, colors: item.tagColors); cloud(item)
+                    if !pane.query.isEmpty, item.url.deletingLastPathComponent().standardizedFileURL != pane.url.standardizedFileURL { Text("in " + item.url.deletingLastPathComponent().lastPathComponent).foregroundStyle(.tertiary).lineLimit(1).help(item.url.deletingLastPathComponent().path) }
+                }
                     .contextMenu { FileContextMenu(workspace: workspace, pane: pane, entry: item) }.onDrag { drag(item) }
             }.width(min: 140, ideal: 250)
             TableColumn("Date Modified") { item in Text(item.modified.formatted(date: .abbreviated, time: .shortened)).foregroundStyle(.secondary).font(.system(size: 11)) }.width(min: 110, ideal: 160)
@@ -245,7 +248,7 @@ struct PaneView: View {
                 ForEach(groups, id: \.name) { group in
                     Section {
                         ForEach(group.entries) { item in
-                            VStack(spacing: 6) { FileIcon(url: item.url, size: preferences.iconSize); HStack(spacing: 4) { TagDots(tags: item.tags); Text(item.name).font(.system(size: 11)).lineLimit(2).multilineTextAlignment(.center) }; cloud(item) }
+                            VStack(spacing: 6) { FileIcon(url: item.url, size: preferences.iconSize); HStack(spacing: 4) { TagDots(tags: item.tags, colors: item.tagColors); Text(item.name).font(.system(size: 11)).lineLimit(2).multilineTextAlignment(.center) }; cloud(item) }
                                 .padding(8).frame(maxWidth: .infinity).frame(height: preferences.iconSize + 65, alignment: .top)
                                 .background(pane.selection.contains(item.id) ? Color.accentColor.opacity(0.18) : .clear, in: RoundedRectangle(cornerRadius: 7))
                                 .contentShape(Rectangle()).onTapGesture(count: 2) { workspace.activate(pane); workspace.open([item.url]) }
@@ -280,7 +283,7 @@ struct PaneView: View {
                     }.frame(width: 235)
                     Divider()
                 }
-                if let path = pane.selection.sorted().first { FilePreview(entry: try? FileEntry(url: URL(fileURLWithPath: path))).frame(width: 280) }
+                if let path = pane.selection.sorted().first { FilePreview(entry: try? FileEntry(url: URL(fileURLWithPath: path)), compact: true).frame(width: 280) }
             }
         }
     }
@@ -336,38 +339,40 @@ struct SearchSummary: View {
                     Text("Saved scope: \(roots.count) folder(s)").help(roots.map(\.path).joined(separator: "\n"))
                     Button("This Folder") { pane.savedSearchRoots = nil; pane.searchAllRoots = false; pane.runSearch() }
                 } else {
-                    Picker("Scope", selection: $pane.searchAllRoots) { Text("This folder").tag(false); Text("Approved folders").tag(true) }.pickerStyle(.segmented).frame(maxWidth: 270).onChange(of: pane.searchAllRoots) { _, _ in pane.runSearch() }
+                    Picker("Scope", selection: $pane.searchAllRoots) { Text("This folder").tag(false); Text("Approved folders").tag(true) }.pickerStyle(.segmented).labelsHidden().controlSize(.small).frame(maxWidth: 240).onChange(of: pane.searchAllRoots) { _, _ in pane.runSearch() }
                 }
-                Spacer(); Button("Save") { workspace.saveSearch() }.buttonStyle(.borderless)
+                Spacer()
+                Image(systemName: "info.circle").foregroundStyle(.secondary).help(search.plan.explanation).accessibilityLabel(search.plan.explanation)
+                Button("Save Search…") { workspace.saveSearch() }.buttonStyle(.borderless)
             }
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack {
                     ForEach(search.plan.filters) { filter in
-                        HStack(spacing: 4) { Text(filter.label); Button { pane.query = pane.query.replacingOccurrences(of: filter.expression, with: "", options: .caseInsensitive).trimmingCharacters(in: .whitespaces) } label: { Image(systemName: "xmark").font(.system(size: 8)) } }.padding(.horizontal, 8).padding(.vertical, 4).background(Color.accentColor.opacity(0.12), in: Capsule()).contextMenu { Button("Edit Filter…") { if let text = prompt("Edit Filter", message: "Use natural language or an explicit operator.", value: filter.expression) { pane.query = pane.query.replacingOccurrences(of: filter.expression, with: text) } } }.help(filter.expression)
+                        HStack(spacing: 4) { Text(filter.label); Button { pane.query = pane.query.replacingOccurrences(of: filter.expression, with: "", options: .caseInsensitive).trimmingCharacters(in: .whitespaces) } label: { Image(systemName: "xmark").font(.system(size: 8, weight: .semibold)) }.buttonStyle(.plain).foregroundStyle(.secondary).accessibilityLabel("Remove filter \(filter.label)") }.padding(.horizontal, 8).padding(.vertical, 4).background(Color.accentColor.opacity(0.12), in: Capsule()).contextMenu { Button("Edit Filter…") { if let text = prompt("Edit Filter", message: "Use natural language or an explicit operator.", value: filter.expression) { pane.query = pane.query.replacingOccurrences(of: filter.expression, with: text) } } }.help(filter.expression)
                     }
                 }
             }
             if !search.plan.warnings.isEmpty { Text(search.plan.warnings.joined(separator: " · ")).foregroundStyle(.orange) }
-            Text(search.plan.explanation).foregroundStyle(.secondary).lineLimit(3)
-        }.font(.system(size: 10)).padding(10).background(Color.accentColor.opacity(0.025))
+        }.font(.system(size: 11)).padding(10).background(Color.accentColor.opacity(0.025))
     }
 }
 
 struct TagDots: View {
     let tags: [String]
+    var colors: [String: Int] = [:]
     var body: some View {
         if !tags.isEmpty {
             HStack(spacing: -3) {
-                ForEach(tags.prefix(3), id: \.self) { tag in Circle().fill(tagColor(tag)).overlay(Circle().stroke(Color(nsColor: .textBackgroundColor), lineWidth: 1)).frame(width: 9, height: 9) }
+                ForEach(tags.prefix(3), id: \.self) { tag in Circle().fill(tagColor(tag, index: colors[tag])).overlay(Circle().stroke(Color(nsColor: .textBackgroundColor), lineWidth: 1)).frame(width: 9, height: 9) }
             }.help(tags.joined(separator: ", ")).accessibilityLabel("Tags: " + tags.joined(separator: ", "))
         }
     }
 }
-// shortcut: colours only Finder's standard tag names; custom tags (colour stored in an xattr) show grey. Parse _kMDItemUserTags if users ask.
-@MainActor func tagColor(_ name: String) -> Color {
+/// Uses the colour recorded with the tag; falls back to matching Finder's standard tag names; colourless tags are grey.
+@MainActor func tagColor(_ name: String, index: Int? = nil) -> Color {
     let labels = NSWorkspace.shared.fileLabels, colors = NSWorkspace.shared.fileLabelColors
-    if let index = labels.firstIndex(of: name), index > 0, index < colors.count { return Color(nsColor: colors[index]) }
-    return .gray
+    let resolved = index ?? labels.firstIndex(of: name) ?? 0
+    return resolved > 0 && resolved < colors.count ? Color(nsColor: colors[resolved]) : .gray
 }
 
 struct FileIcon: View {
@@ -456,10 +461,12 @@ func localPreviewAllowed(_ url: URL) -> Bool {
 
 struct FilePreview: View {
     let entry: FileEntry?
+    /// Side panels keep details right under a fixed-height preview; Gallery lets the preview fill the space.
+    var compact = false
     var body: some View {
         if let entry {
             VStack(alignment: .leading, spacing: 10) {
-                QuickPreview(url: entry.url).frame(minHeight: 100, maxHeight: .infinity)
+                if compact { QuickPreview(url: entry.url).frame(height: 240) } else { QuickPreview(url: entry.url).frame(minHeight: 100, maxHeight: .infinity) }
                 Text(entry.name).font(.headline).textSelection(.enabled)
                 Text(entry.kind + (entry.isDirectory ? "" : " · " + ByteCountFormatter.string(fromByteCount: entry.size, countStyle: .file))).foregroundStyle(.secondary)
                 Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 7) {
@@ -468,6 +475,7 @@ struct FilePreview: View {
                     if !entry.tags.isEmpty { GridRow { Text("Tags").foregroundStyle(.secondary); Text(entry.tags.joined(separator: ", ")) } }
                     if !entry.cloudStatus.isEmpty { GridRow { Text("Status").foregroundStyle(.secondary); Text(entry.cloudStatus) } }
                 }.font(.system(size: 10))
+                if compact { Spacer(minLength: 0) }
             }.padding(16)
         } else { Text("Select a file to preview").foregroundStyle(.secondary).frame(maxWidth: .infinity, maxHeight: .infinity) }
     }

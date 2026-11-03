@@ -106,20 +106,58 @@ struct QuickOpenView: View {
             fuzzyScore(text, url.lastPathComponent).map { $0 + 1 } ?? (text.isEmpty || url.path.localizedCaseInsensitiveContains(text) ? 0 : nil)
         }
     }
+    enum Item: Hashable { case folder(URL), workspace(String), command(String) }
+    /// Typing ">" switches to commands, like the command palette.
+    var commandMode: Bool { query.hasPrefix(">") }
+    var items: [Item] {
+        if commandMode { return commands.map(Item.command) }
+        return folders.map(Item.folder) + ranked(workspace.availableWorkspaces) { fuzzyScore(query.trimmingCharacters(in: .whitespaces), $0) }.map(Item.workspace)
+    }
+    @State private var highlighted = 0
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack { Image(systemName: "magnifyingglass"); TextField("Folder, tab, workspace — or > command", text: $query).textFieldStyle(.plain).focused($focused).onSubmit { if query.hasPrefix(">") || workspace.quickCommand { if let command = commands.first { runCommand(command) } } else if let url = folders.first { workspace.active.navigate(url); dismiss() } }; Button("Done") { dismiss() } }
-            Divider()
-            ScrollView {
-                VStack(alignment: .leading, spacing: 3) {
-                    if query.hasPrefix(">") || workspace.quickCommand { ForEach(commands, id: \.self) { title in Button(title) { runCommand(title) }.buttonStyle(.plain).padding(7).frame(maxWidth: .infinity, alignment: .leading) } }
-                    else {
-                        ForEach(folders, id: \.self) { url in Button { workspace.active.navigate(url); dismiss() } label: { HStack { Image(systemName: "folder"); VStack(alignment: .leading) { Text(url.lastPathComponent); Text(url.deletingLastPathComponent().path).font(.caption).foregroundStyle(.secondary) }; Spacer() }.padding(7) }.buttonStyle(.plain) }
-                        ForEach(ranked(workspace.availableWorkspaces) { fuzzyScore(query.trimmingCharacters(in: .whitespaces), $0) }, id: \.self) { name in Button("Workspace: " + name) { workspace.openWorkspace(name); dismiss() }.buttonStyle(.plain).padding(7) }
-                    }
-                }
+        let results = items
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Image(systemName: commandMode ? "command" : "magnifyingglass").foregroundStyle(.secondary)
+                TextField("Folder, tab, workspace — or > command", text: $query).textFieldStyle(.plain).font(.title3).focused($focused)
+                    .onSubmit { if results.indices.contains(highlighted) { run(results[highlighted]) } }
+                    .onKeyPress(.downArrow) { highlighted = min(highlighted + 1, max(0, results.count - 1)); return .handled }
+                    .onKeyPress(.upArrow) { highlighted = max(highlighted - 1, 0); return .handled }
+                    .onKeyPress(.escape) { dismiss(); return .handled }
+                Button("Done") { dismiss() }
             }
-        }.padding(20).frame(width: 560, height: 400).onAppear { focused = true; if workspace.quickCommand { query = "> " } }
+            Divider()
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 2) {
+                        ForEach(Array(results.enumerated()), id: \.element) { index, item in
+                            Button { run(item) } label: { row(item).padding(.horizontal, 8).padding(.vertical, 6).frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle()) }
+                                .buttonStyle(.plain)
+                                .background(index == highlighted ? Color.accentColor.opacity(0.22) : .clear, in: RoundedRectangle(cornerRadius: 6))
+                                .id(index)
+                        }
+                        if results.isEmpty { Text(commandMode ? "No matching commands" : "No matching folders or workspaces").foregroundStyle(.secondary).padding(8) }
+                    }
+                }.onChange(of: highlighted) { _, value in proxy.scrollTo(value) }
+            }
+            Text("↑↓ to choose · Return to open · type > for commands").font(.caption).foregroundStyle(.tertiary)
+        }.padding(20).frame(width: 560, height: 420)
+        .onChange(of: query) { _, _ in highlighted = 0 }
+        .onAppear { focused = true; if workspace.quickCommand { query = "> " } }
+    }
+    @ViewBuilder func row(_ item: Item) -> some View {
+        switch item {
+        case .folder(let url): HStack { Image(systemName: "folder").foregroundStyle(.tint); VStack(alignment: .leading) { Text(url.path == "/" ? "Macintosh HD" : url.lastPathComponent); Text(url.deletingLastPathComponent().path).font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle) } }
+        case .workspace(let name): Label("Workspace: " + name, systemImage: "rectangle.split.2x2")
+        case .command(let title): Label(title, systemImage: "command").labelStyle(.titleOnly)
+        }
+    }
+    func run(_ item: Item) {
+        switch item {
+        case .folder(let url): workspace.active.navigate(url); dismiss()
+        case .workspace(let name): workspace.openWorkspace(name); dismiss()
+        case .command(let title): runCommand(title)
+        }
     }
     func runCommand(_ title: String) { dismiss(); DispatchQueue.main.async { AppDelegate.shared.runCommand(title) } }
 }

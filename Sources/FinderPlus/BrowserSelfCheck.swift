@@ -30,6 +30,10 @@ import Foundation
               FileGrouping.size.groups(entries, now: now).map(\.name) == ["1 MB to 100 MB", "100 KB to 1 MB", "Under 100 KB", "Folders"],
               FileGrouping.none.groups(entries).first?.entries.count == 4,
               totalFileSize([root]) == 2_150_010 else { throw CocoaError(.validationNumberTooSmall) }
+        let tagged = root.appendingPathComponent("a.txt")
+        let tagPlist = try PropertyListSerialization.data(fromPropertyList: ["Work\n4", "Red\n6"], format: .binary, options: 0)
+        _ = tagPlist.withUnsafeBytes { setxattr(tagged.path, "com.apple.metadata:_kMDItemUserTags", $0.baseAddress, tagPlist.count, 0, 0) }
+        guard try FileEntry(url: tagged).tagColors == ["Work": 4, "Red": 6] else { throw CocoaError(.validationInvalidDate) }
         var job = TransferJob(id: UUID(), title: "Copy")
         job.copiedBytes = 500_000_000; job.totalBytes = 1_000_000_000; job.bytesPerSecond = 100_000_000
         guard job.transferStats.contains("500 MB of 1 GB"), job.transferStats.contains("/s"), job.transferStats.contains("left") else { throw CocoaError(.validationNumberTooLarge) }

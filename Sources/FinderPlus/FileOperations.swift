@@ -74,7 +74,7 @@ final class FileOperations: ObservableObject {
     private var controls: [UUID: OperationControl] = [:]
     @Published private(set) var activeID: UUID?
     private var processing: Task<Void, Never>?
-    private var globallyPaused = false
+    @Published private(set) var globallyPaused = false
     private var failedRequests: [UUID: OperationRequest] = [:]
     private var rateSamples: [UUID: (time: TimeInterval, bytes: Int64)] = [:]
     private var confirmingHistory = false
@@ -632,8 +632,8 @@ struct OperationsPanel: View {
                 Spacer()
                 Button("Undo") { operations.undo() }.disabled(!operations.canUndo || operations.isBusy)
                 Button("Redo") { operations.redo() }.disabled(!operations.canRedo || operations.isBusy)
-                Button("Pause All") { operations.pauseAll() }
-                Button("Resume All") { operations.resumeAll() }
+                Button(operations.globallyPaused ? "Resume All" : "Pause All") { if operations.globallyPaused { operations.resumeAll() } else { operations.pauseAll() } }
+                    .disabled(!operations.isBusy && !operations.globallyPaused)
             }
             if !operations.recoveryItems.isEmpty {
                 GroupBox("Interrupted operations — recovery required") {
@@ -647,6 +647,10 @@ struct OperationsPanel: View {
                     }
                 }
             }
+            if operations.jobs.isEmpty {
+                ContentUnavailableView("No File Operations", systemImage: "arrow.left.arrow.right", description: Text("Copies, moves, renames and other changes appear here with progress, speed and time left."))
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
             List {
                 ForEach(operations.jobs) { job in
                     VStack(alignment: .leading, spacing: 5) {
@@ -672,7 +676,7 @@ struct OperationsPanel: View {
                         }
                     }.padding(.vertical, 5)
                 }
-                if operations.jobs.isEmpty { Text("No operations queued").foregroundStyle(.secondary) }
+            }
             }
             if !operations.problems.isEmpty {
                 GroupBox("Problems") {
@@ -680,10 +684,12 @@ struct OperationsPanel: View {
                     Button("Clear messages") { operations.clearProblems() }
                 }
             }
+            DisclosureGroup("How verification, Undo and recovery storage work") {
             Text("Moves within one disk are instant renames. Copies and moves between disks are staged and fingerprint-verified before commit. Undo data is retained in hidden .FinderPlus folders beside affected items; these consume disk space and are never automatically purged. Do not delete them while you need Undo. Folders containing retained storage cannot be moved or renamed. Changed files are never overwritten by Undo or recovery. Trash recovery requires the item to remain in Trash. ZIP creation pauses between process slices; rollback and network/provider calls may finish before pausing.")
                 .font(.caption).foregroundStyle(.secondary)
             Text("Clear File Operation History releases retained storage to system Trash after verification and removes the folder-movement restriction. All app Undo, Redo, and Put Back records are lost. Modified or unverified storage is left untouched.")
                 .font(.caption).foregroundStyle(.secondary)
+            }.font(.caption)
             HStack {
                 Button("Clear finished") { operations.clearFinished() }
                 Button("Show journal") { operations.revealRecoveryStorage() }

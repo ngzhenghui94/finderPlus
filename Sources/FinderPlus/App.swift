@@ -87,7 +87,7 @@ import Combine
         window.title = title; window.contentView = NSHostingView(rootView: view); window.isReleasedWhenClosed = false; window.delegate = self
         windows.append(window); window.center(); window.makeKeyAndOrderFront(nil)
     }
-    func showSettings() { show(title: "FinderPlus Settings", view: AnyView(SettingsView()), size: NSSize(width: 760, height: 600)) }
+    func showSettings() { show(title: "FinderPlus Settings", view: AnyView(SettingsView()), size: NSSize(width: 684, height: 494)) }
     func showOperations() { show(title: "File Operations", view: AnyView(OperationsPanel()), size: NSSize(width: 680, height: 530)) }
     func restoreWindows(_ states: [WorkspaceSnapshot]) {
         restoringWindows = true
@@ -277,15 +277,14 @@ import Combine
             }
         }
         if [123, 124, 125, 126].contains(event.keyCode) {
-            let files = pane.shown
-            if pane.mode == .columns && event.keyCode == 124, let entry = files.first(where: { pane.selection.contains($0.id) }), entry.isDirectory { workspace.open([entry.url]); return nil }
-            if pane.mode == .columns && event.keyCode == 123 { pane.navigate(pane.url.deletingLastPathComponent()); return nil }
+            if pane.mode == .columns && pane.query.isEmpty && !flags.contains(.shift) && pane.moveInColumns(event.keyCode) { return nil }
+            let files = pane.displayed
             if !files.isEmpty { let old = files.firstIndex(where: { pane.selection.contains($0.id) }) ?? -1; let delta = event.keyCode == 123 || event.keyCode == 126 ? -1 : 1; let next = min(max(old + delta, 0), files.count - 1); if flags.contains(.shift) { pane.selection.insert(files[next].id) } else { pane.selection = [files[next].id] } }
             return nil
         }
         if let chars = event.characters, chars.rangeOfCharacter(from: .alphanumerics) != nil {
             if Date().timeIntervalSince(lastTyped) > 0.8 { typedName = "" }; typedName += chars; lastTyped = Date()
-            if let file = pane.shown.first(where: { $0.name.lowercased().hasPrefix(typedName.lowercased()) }) { pane.selection = [file.id] }
+            if let file = pane.displayed.first(where: { $0.name.lowercased().hasPrefix(typedName.lowercased()) }) { if pane.mode == .columns && pane.query.isEmpty { pane.chooseColumn(file, at: 0) } else { pane.selection = [file.id] } }
             return nil
         }
         return event
@@ -293,20 +292,34 @@ import Combine
 }
 
 struct HelpView: View {
+    let shortcuts: [(String, String)] = [
+        ("⌘1 – ⌘4", "Icons, List, Columns, Gallery"), ("⌘F", "Search"), ("⌃⌘P", "Quick Open (type > for commands)"),
+        ("⇧⌘G", "Go to Folder"), ("⌘[  ⌘]", "Back, Forward"), ("⌃⌥⌘ arrow", "Split the pane"), ("⇧⌘Return", "Zoom the pane"),
+        ("⌃⌘[  ⌃⌘]", "Previous, next pane"), ("⌃⇧⌘C  ⌃⇧⌘M", "Copy, move to the other pane"), ("⌘C  ⌘V  ⌥⌘V", "Copy, paste, move here"),
+        ("Space", "Quick Look"), ("⌘I", "Get Info"), ("⌘Z", "Undo the last file operation"),
+    ]
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
-                Text("FinderPlus").font(.largeTitle.bold())
-                Text("Browse familiar folders. Find files by what you remember.").font(.title3)
-                Text("Search").font(.headline)
-                Text("Try screenshots last week, videos larger than 1 GB, downloaded from github, pdfs created this month, or content:\"project brief\". Filters appear below the search field. Remove a chip to broaden a query, or right-click it to edit. Choose approved roots in Settings. Content and image text search require a separate opt-in; nothing is sent to a server.")
-                Text("Browse and arrange").font(.headline)
-                Text("⌘1–4 switches Icons, List, Columns and Gallery. Space opens Quick Look; Return renames; ⌘↓ opens. ⌘[ / ⌘] go back and forward. Use the pane menu for up to 16 splits, ⇧⌘Return to zoom, and Save Workspace to remember a layout. ⌃⌘P jumps to folders, tabs and workspaces; prefix > to run a command.")
-                Text("Move files safely").font(.headline)
-                Text("⌘C then ⌘V copies; ⌥⌘V moves. Add files to Shelf to gather items across folders. Existing names require a conflict choice. Review destructive actions and synchronization before confirming. File Operations shows progress, pause controls, errors, undo history and interrupted work. Always keep a separate backup.")
-                Text("Cloud folders").font(.headline)
-                Text("Your provider’s Mac app handles sign-in and synchronization. FinderPlus browses its local folders. Cloud-only files must be downloaded before file operations. Provider-specific actions depend on macOS support; Finder remains available from the context menu.")
-            }.padding(26).textSelection(.enabled)
+            VStack(alignment: .leading, spacing: 20) {
+                HStack(spacing: 14) {
+                    Image(nsImage: NSApp.applicationIconImage).resizable().frame(width: 56, height: 56).accessibilityHidden(true)
+                    VStack(alignment: .leading, spacing: 2) { Text("FinderPlus").font(.largeTitle.bold()); Text("Browse familiar folders. Find files by what you remember.").foregroundStyle(.secondary) }
+                }
+                section("Browse and arrange", "rectangle.split.2x2", "Switch views with ⌘1–4 and group by kind, date, size or tags from the toolbar or View menu. Split any pane in four directions for up to 16 panes, zoom one with ⇧⌘Return, and save the arrangement as a workspace. Mouse side buttons and trackpad swipes go back and forward in the pane under the pointer.")
+                section("Search", "magnifyingglass", "Type what you remember: screenshots last week, videos larger than 1 GB, downloaded from github, pdfs created this month, or content:\"project brief\". Each understood filter becomes a chip you can remove or right-click to edit. Approve folders in Settings › Search & Privacy; content and image-text search are separate opt-ins and nothing leaves your Mac.")
+                section("Move files safely", "arrow.left.arrow.right", "When a name already exists you see both versions with the newer one marked, and Keep Both is the default. File Operations shows speed and time left, lets you pause, reorder and retry, and Undo works even after relaunching. Gather files from several folders on the Shelf, then copy or move them together. Keep a separate backup.")
+                section("Cloud folders", "icloud", "Your provider’s Mac app handles sign-in and syncing; FinderPlus browses its local folder. Online-only files are never downloaded by browsing or search. Use Download Now before file operations.")
+                VStack(alignment: .leading, spacing: 8) {
+                    Label("Shortcuts", systemImage: "keyboard").font(.headline)
+                    Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 6) {
+                        ForEach(shortcuts, id: \.0) { keys, action in GridRow { Text(keys).font(.body.monospaced()).foregroundStyle(.secondary); Text(action) } }
+                    }
+                    Text("Return renames in the Finder keyboard profile and opens in Explorer and Total Commander. Change the profile or any shortcut in Settings › Keyboard.").font(.caption).foregroundStyle(.secondary)
+                }
+            }.padding(26).frame(maxWidth: .infinity, alignment: .leading).textSelection(.enabled)
         }
+    }
+    func section(_ title: String, _ symbol: String, _ text: String) -> some View {
+        VStack(alignment: .leading, spacing: 6) { Label(title, systemImage: symbol).font(.headline); Text(text).fixedSize(horizontal: false, vertical: true) }
     }
 }

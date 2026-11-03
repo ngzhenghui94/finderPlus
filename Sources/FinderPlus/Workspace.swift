@@ -186,7 +186,7 @@ import UniformTypeIdentifiers
     func select(_ entry: FileEntry) {
         let flags = NSApp.currentEvent?.modifierFlags ?? []
         if flags.contains(.command) { if active.selection.contains(entry.id) { active.selection.remove(entry.id) } else { active.selection.insert(entry.id) }; active.selectionAnchor = entry.id }
-        else if flags.contains(.shift), let anchor = active.selectionAnchor ?? active.selection.sorted().first, let a = active.shown.firstIndex(where: { $0.id == anchor }), let b = active.shown.firstIndex(of: entry) { active.selection = Set(active.shown[min(a,b)...max(a,b)].map(\.id)) }
+        else if flags.contains(.shift), let anchor = active.selectionAnchor ?? active.selection.sorted().first, let a = active.displayed.firstIndex(where: { $0.id == anchor }), let b = active.displayed.firstIndex(of: entry) { active.selection = Set(active.displayed[min(a,b)...max(a,b)].map(\.id)) }
         else { active.selection = [entry.id]; active.selectionAnchor = entry.id }
     }
     deinit { observations.forEach(NotificationCenter.default.removeObserver) }

@@ -12,6 +12,8 @@ struct FileEntry: Identifiable, Hashable {
     let created: Date
     let kind: String
     let tags: [String]
+    /// Finder colour index per tag (0 none, 1 gray … 7 orange), from the same xattr Finder writes.
+    let tagColors: [String: Int]
     let cloudStatus: String
 
     init(url: URL) throws {
@@ -24,7 +26,20 @@ struct FileEntry: Identifiable, Hashable {
         created = values.creationDate ?? .distantPast
         kind = values.localizedTypeDescription ?? (isDirectory ? "Folder" : url.pathExtension.uppercased() + " file")
         tags = values.tagNames ?? []
+        tagColors = tags.isEmpty ? [:] : Self.tagColors(url)
         cloudStatus = CloudLocations.status(url)
+    }
+    static func tagColors(_ url: URL) -> [String: Int] {
+        let name = "com.apple.metadata:_kMDItemUserTags"
+        let size = getxattr(url.path, name, nil, 0, 0, XATTR_NOFOLLOW)
+        guard size > 0, size < 65_536 else { return [:] }
+        var data = Data(count: size)
+        let read = data.withUnsafeMutableBytes { getxattr(url.path, name, $0.baseAddress, size, 0, XATTR_NOFOLLOW) }
+        guard read == size, let list = (try? PropertyListSerialization.propertyList(from: data, format: nil)) as? [String] else { return [:] }
+        return Dictionary(list.map { entry in
+            let parts = entry.split(separator: "\n", maxSplits: 1)
+            return (String(parts.first ?? ""), parts.count > 1 ? Int(parts[1]) ?? 0 : 0)
+        }, uniquingKeysWith: { first, _ in first })
     }
 }
 
@@ -179,6 +194,26 @@ struct SavedSearch: Identifiable, Codable {
     var selectionAnchor: String?
     var selected: [URL] { selection.sorted().map { URL(fileURLWithPath: $0) } }
     var shown: [FileEntry] { sorted(query.isEmpty ? entries : search.results) }
+    /// What the user sees, in order: grouped in List and Icons, so keyboard and shift-click follow the screen.
+    var displayed: [FileEntry] { mode == .list || mode == .icons ? AppPreferences.shared.groupBy.groups(shown).flatMap(\.entries) : shown }
+    /// Finder-style column keys: ↑↓ within the selected item's column, → into a folder, ← back to its parent column.
+    func moveInColumns(_ key: UInt16) -> Bool {
+        guard selection.count == 1, let id = selection.first, let column = columnEntries.lastIndex(where: { $0.contains { $0.id == id } }) else {
+            guard key == 124 || key == 125, let first = sorted(columnEntries.first ?? []).first else { return false }
+            chooseColumn(first, at: 0); return true
+        }
+        let items = sorted(columnEntries[column])
+        guard let index = items.firstIndex(where: { $0.id == id }) else { return false }
+        switch key {
+        case 125, 126: chooseColumn(items[min(max(index + (key == 125 ? 1 : -1), 0), items.count - 1)], at: column)
+        case 124: if items[index].isDirectory, column + 1 < columnEntries.count, let first = sorted(columnEntries[column + 1]).first { chooseColumn(first, at: column + 1) }
+        case 123:
+            if column > 0, let folder = try? FileEntry(url: columnFolders[column]) { chooseColumn(folder, at: column - 1) }
+            else { navigate(url.deletingLastPathComponent()) }
+        default: return false
+        }
+        return true
+    }
     func sorted(_ values: [FileEntry]) -> [FileEntry] {
         values.filter { filter.isEmpty || $0.name.localizedCaseInsensitiveContains(filter) }.sorted {
             if AppPreferences.shared.foldersFirst && $0.isDirectory != $1.isDirectory { return $0.isDirectory }
