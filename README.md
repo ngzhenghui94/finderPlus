@@ -43,6 +43,10 @@ Common default shortcuts:
 | Quick Look | Space |
 | Settings | Command-comma |
 
+Context-menu copy/move targets the other pane relative to the clicked file, even when its pane was inactive. Search/filter edits clear the prior selection; Shift-arrow selection can expand and shrink repeatedly. Restoring a malformed saved session repairs missing or duplicate pane/tab identities and invalid layouts while retaining saved tabs.
+
+Custom shortcuts support a literal plus key, such as `cmd++`, including JSON import.
+
 ## Local, inspectable search
 
 Search the current folder and its descendants, or switch to explicitly approved roots. Add approved roots in **Settings → Search & Privacy**. The parser runs on-device; no prompts, file names or file contents are sent to an AI service. Query chips show the interpreted constraints and can be edited or removed.
@@ -82,11 +86,13 @@ Folder comparison hashes file contents recursively. Synchronization copies only 
 
 Queued synchronization retains the original reviewed content hashes and checks them again when executing. Changes between review and enqueue, redirected parent paths outside the compared roots, newly occupied destinations (including dangling symlinks), and added children in a reviewed empty folder require another comparison.
 
+Get Info checks fresh file identity and displayed metadata before saving. Replaced files, replacement symlinks, and externally changed metadata require Refresh; failed refreshes disable editing and Save. Metadata writes are not atomic, so an error during the setters can leave earlier attributes changed.
+
 ## Send to Nearby Mac
 
 Nearby Share is off by default; turn it on in **Settings → General** on both Macs. While it is on, this Mac is visible to other FinderPlus Macs on the network, and sender names are not verified. Select files and choose **File → Send to Nearby Mac…** (or the context menu) to send them straight to another Mac running FinderPlus on the same local network, similar to Spacedrive's Spacedrop. Peers are found over Bonjour; the receiver must accept each request, and accepted files are saved to Downloads under a new name if one already exists, with the macOS quarantine flag set like AirDrop. Folders must be compressed first. Transfers use plain TCP and are **not encrypted**—use them only on networks you trust.
 
-Incoming batches stay in hidden staging until every file arrives. Interrupted or cancelled transfers remove their unpublished data; turning Nearby Share off cancels active transfer tasks as well as discovery. A lost final acknowledgement does not turn already-saved files into a receiver-side failure.
+This build uses **Nearby Share protocol 2: update both Macs**. Older peers are not discovered. Incoming batches stay in hidden staging until every file arrives and the sender confirms completion. The sender checks source identity, size and modification time before and after reading; detected changes abort without publishing received files. Filename collision suffixes are shortened to fit without overwriting existing files. Interrupted or cancelled transfers remove their unpublished data; turning Nearby Share off cancels active transfer tasks as well as discovery. A lost final acknowledgement does not turn already-saved files into a receiver-side failure.
 
 ## Cloud folders and privacy
 
@@ -105,6 +111,8 @@ Folder-creation checks also exercised the toolbar, empty-folder action, File men
 The audit regression suite additionally covers failed Back/Forward navigation, deterministic sorting of equal-name search results, tab-history preservation when moving panes, malformed queries, special-file read rejection, privacy revocation and bookmark failures, atomic folder grouping, Redo preservation, stale queued synchronization, and interrupted loopback transfers. The release build and full self-check passed, including a real cross-disk move using a disposable RAM disk and loopback transfer quarantine/no-overwrite checks.
 
 The audited build was installed in `/Applications` and checked through its native UI: malformed search returned no unrelated file, New Folder with Selection completed as one job and one Undo restored the original bytes while removing its folder, and moving an inactive tab selected the correct tab and preserved Back/Forward history. Back/Forward failures leave history intact, and size/kind/date sorting uses paths to break equal-name ties.
+
+A second audit reproduced wrong-pane context-menu copies, stuck Shift-arrow selection, hidden selections after search/filter edits, malformed saved-session invariants, stale Get Info writes, literal-plus shortcut rejection, changed-source transfer success, and maximum-length filename collision failures against the previous build. The updated release build and full self-check passed, including metadata/tag/lock checks, protocol-version rejection, source changes and incomplete-transfer cleanup. Installed-app UI checks verified the corrected copy destination and bytes, expanding/shrinking selection, cleared search selection, replacement-symlink rejection with unchanged target timestamps, disabled Save after failed Refresh, and successful literal-plus shortcut import for review.
 
 Residual boundary: filesystem checks are path-based, so a different process can still change a path between validation and the final filesystem call. Multi-Mac sharing, live cloud providers, forced process termination during transfer, and every supported macOS release were not exercised by this audit.
 

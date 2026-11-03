@@ -32,10 +32,21 @@ import UniformTypeIdentifiers
     var window: NSWindow?
     var availableWorkspaces: [String] { (UserDefaults.standard.dictionary(forKey: "workspaces") ?? [:]).keys.sorted() }
     init(snapshot: WorkspaceSnapshot? = nil) {
-        let initial = BrowserPane()
-        panes = snapshot?.panes.map { BrowserPane(snapshot: $0) } ?? [initial]
-        layout = snapshot?.layout ?? .leaf(initial.id)
-        activeID = snapshot?.active ?? initial.id
+        var seen = Set<UUID>()
+        var restored = (snapshot?.panes ?? []).map {
+            var saved = $0
+            if !seen.insert(saved.id).inserted { saved.id = UUID() }
+            return BrowserPane(snapshot: saved)
+        }
+        if restored.isEmpty { restored = [BrowserPane()] }
+        panes = restored
+        let ids = restored.map(\.id)
+        if let saved = snapshot, saved.layout.ids.count == ids.count, Set(saved.layout.ids) == Set(ids) {
+            layout = saved.layout
+        } else {
+            layout = ids.dropFirst().reduce(.leaf(ids[0])) { .split(vertical: true, first: $0, second: .leaf($1)) }
+        }
+        activeID = snapshot.map { ids.contains($0.active) ? $0.active : ids[0] } ?? ids[0]
         favorites = Self.decode("favorites") ?? []
         savedSearches = Self.decode("savedSearches") ?? []
         groups = UserDefaults.standard.stringArray(forKey: "sidebarGroups") ?? []

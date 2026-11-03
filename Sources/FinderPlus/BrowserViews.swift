@@ -511,7 +511,7 @@ struct FileContextMenu: View {
         Button("Add to Shelf") { prepare(); workspace.addShelf() }
         Button("Add to Sidebar") { workspace.addFavorite(entry.url) }
         if !entry.isDirectory { Button("Send to Nearby Mac…") { prepare(); NearbyShareService.shared.send(pane.selected) } }
-        if let other = workspace.other {
+        if let other = workspace.panes.first(where: { $0.id != pane.id }) {
             Button("Copy to Other Pane") { prepare(); FileOperations.shared.copy(pane.selected, to: other.url) }
             Button("Move to Other Pane") { prepare(); FileOperations.shared.copy(pane.selected, to: other.url, move: true) }
         }

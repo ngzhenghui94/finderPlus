@@ -18,5 +18,5 @@
 <key>NSNetworkVolumesUsageDescription</key><string>Browse and manage network folders you choose.</string>
 <key>NSRemovableVolumesUsageDescription</key><string>Browse and manage removable drives you choose.</string>
 <key>NSLocalNetworkUsageDescription</key><string>Find nearby Macs running FinderPlus and send files to them.</string>
-<key>NSBonjourServices</key><array><string>_finderplus-drop._tcp</string></array>
+<key>NSBonjourServices</key><array><string>_finderplus-drop2._tcp</string></array>
 </dict></plist>

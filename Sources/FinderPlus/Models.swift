@@ -159,11 +159,17 @@ struct SavedSearch: Identifiable, Codable {
     @Published var activeTab: UUID
     @Published var entries: [FileEntry] = [] { didSet { shownCache = nil } }
     @Published var slowLoad = false
-    @Published var selection: Set<String> = []
+    @Published var selection: Set<String> = [] {
+        didSet {
+            selectionCursor = nil
+            if selection.count <= 1 { selectionAnchor = selection.first }
+            else if let selectionAnchor, !selection.contains(selectionAnchor) { self.selectionAnchor = nil }
+        }
+    }
     @Published var error = ""
     @Published var loading = false
-    @Published var query = "" { didSet { shownCache = nil } }
-    @Published var filter = "" { didSet { shownCache = nil } }
+    @Published var query = "" { didSet { shownCache = nil; selection = [] } }
+    @Published var filter = "" { didSet { shownCache = nil; selection = [] } }
     @Published var searchAllRoots = false
     @Published var savedSearchRoots: [URL]?
     var searchRoots: [URL] { savedSearchRoots ?? (searchAllRoots ? AppPreferences.shared.searchRoots : [url]) }
@@ -190,6 +196,8 @@ struct SavedSearch: Identifiable, Codable {
         let tab = BrowserTab(url: url)
         tabs = snapshot?.tabs.isEmpty == false ? snapshot!.tabs : [tab]
         activeTab = snapshot?.activeTab ?? tab.id
+        var seen = Set<UUID>()
+        for index in tabs.indices where !seen.insert(tabs[index].id).inserted { tabs[index].id = UUID() }
         if !tabs.contains(where: { $0.id == activeTab }) { activeTab = tabs[0].id }
         searchObservation = search.objectWillChange.sink { [weak self] _ in self?.shownCache = nil; self?.objectWillChange.send() }
     }
@@ -197,6 +205,7 @@ struct SavedSearch: Identifiable, Codable {
     var canGoBack: Bool { tabs.first(where: { $0.id == activeTab })?.back.isEmpty == false }
     var canGoForward: Bool { tabs.first(where: { $0.id == activeTab })?.forward.isEmpty == false }
     var selectionAnchor: String?
+    private var selectionCursor: String?
     var selected: [URL] { selection.sorted().map { URL(fileURLWithPath: $0) } }
     /// Sorted once per change of entries, results, filter or sort order, not on every redraw.
     private var shownCache: (foldersFirst: Bool, value: [FileEntry])?
@@ -209,6 +218,22 @@ struct SavedSearch: Identifiable, Codable {
     }
     /// What the user sees, in order: grouped in List and Icons, so keyboard and shift-click follow the screen.
     var displayed: [FileEntry] { mode == .list || mode == .icons ? AppPreferences.shared.groupBy.groups(shown).flatMap(\.entries) : shown }
+    func moveSelection(by delta: Int, extending: Bool) {
+        let files = displayed
+        guard !files.isEmpty else { return }
+        let first = files.firstIndex { selection.contains($0.id) }
+        let last = files.lastIndex { selection.contains($0.id) }
+        let fallback: Int?
+        if extending { fallback = selectionAnchor == first.map({ files[$0].id }) ? last : first }
+        else { fallback = delta > 0 ? last : first }
+        let old = files.firstIndex { $0.id == selectionCursor } ?? fallback ?? -1
+        let next = min(max(old + delta, 0), files.count - 1)
+        let anchorID = extending ? selectionAnchor ?? (old >= 0 ? files[old].id : files[next].id) : files[next].id
+        let anchor = files.firstIndex { $0.id == anchorID } ?? next
+        selection = Set(files[min(anchor, next)...max(anchor, next)].map(\.id))
+        selectionAnchor = anchorID
+        selectionCursor = files[next].id
+    }
     /// Finder-style column keys: ↑↓ within the selected item's column, → into a folder, ← back to its parent column.
     func moveInColumns(_ key: UInt16) -> Bool {
         guard let column = selectedColumn, let id = selection.first else {

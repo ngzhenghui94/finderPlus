@@ -67,14 +67,26 @@ struct KeyboardShortcutsView: View {
     }
 
     private func validated(_ input: [String: String]) throws -> [String: String] {
+        try Self.validated(input, validTitles: Set(commands.map(\.title)), originalKeys: AppDelegate.shared.originalKeys)
+    }
+
+    static func shortcutParts(_ value: String) -> [String] {
+        var parts = value.components(separatedBy: "+")
+        if value.hasSuffix("++") {
+            parts.removeLast()
+            parts[parts.count - 1] = "+"
+        }
+        return parts
+    }
+
+    private static func validated(_ input: [String: String], validTitles: Set<String>, originalKeys: [String: (String, NSEvent.ModifierFlags)]) throws -> [String: String] {
         var output: [String: String] = [:]
         var used: [String: String] = [:]
-        let validTitles = Set(commands.map(\.title))
         for (title, value) in input {
             guard validTitles.contains(title) else { throw OperationFailure.message("Unknown command in shortcuts: \(title)") }
             let value = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
             if value.isEmpty { continue }
-            let parts = value.components(separatedBy: "+")
+            let parts = shortcutParts(value)
             let modifiers = Array(parts.dropLast())
             guard let key = parts.last, key.count == 1, key.unicodeScalars.allSatisfy({ !$0.properties.isWhitespace && !CharacterSet.controlCharacters.contains($0) }),
                   !modifiers.isEmpty, Set(modifiers).count == modifiers.count,
@@ -90,7 +102,7 @@ struct KeyboardShortcutsView: View {
             if normalized.contains("option") { requestedFlags.insert(.option) }
             if normalized.contains("shift") { requestedFlags.insert(.shift) }
             let relevantFlags: NSEvent.ModifierFlags = [.command, .control, .option, .shift]
-            for (other, original) in AppDelegate.shared.originalKeys where other != title {
+            for (other, original) in originalKeys where other != title {
                 if original.0.lowercased() == key && original.1.intersection(relevantFlags) == requestedFlags {
                     throw OperationFailure.message("\(value) is reserved for \(other). Choose an unused shortcut.")
                 }
@@ -143,5 +155,28 @@ struct KeyboardShortcutsView: View {
             error = nil
             message = "Shortcuts exported."
         } catch { self.error = error.localizedDescription }
+    }
+
+    static func selfCheck() throws {
+        let titles: Set<String> = ["Increase Icon Size", "Other", "Third"]
+        let originals: [String: (String, NSEvent.ModifierFlags)] = ["Increase Icon Size": ("+", .command)]
+        let imported = try JSONDecoder().decode([String: String].self, from: Data(#"{"Increase Icon Size":"cmd++","Other":"ctrl+shift++"}"#.utf8))
+        let shortcuts = try validated(imported, validTitles: titles, originalKeys: originals)
+        guard shortcuts == imported, shortcutParts(shortcuts["Increase Icon Size"]!) == ["cmd", "+"],
+              shortcutParts(shortcuts["Other"]!) == ["ctrl", "shift", "+"] else {
+            throw OperationFailure.message("Literal plus shortcuts did not survive import and activation parsing.")
+        }
+        for input in [
+            ["Other": "cmd++"],
+            ["Other": "ctrl++", "Third": "ctrl++"],
+            ["Other": "cmd+cmd+k"],
+            ["Other": "cmd+++"],
+            ["Other": "cmd+\n"],
+            ["Unknown": "ctrl+k"]
+        ] {
+            do { _ = try validated(input, validTitles: titles, originalKeys: originals) }
+            catch { continue }
+            throw OperationFailure.message("Invalid shortcut import was accepted: \(input)")
+        }
     }
 }

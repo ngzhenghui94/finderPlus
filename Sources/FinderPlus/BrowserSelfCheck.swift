@@ -101,7 +101,33 @@ import Foundation
             }
             try FileManager.default.removeItem(at: missing)
         }
-        guard auditFailures.isEmpty else { throw OperationFailure.message(auditFailures.joined(separator: "; ")) }
+        pane.selection = [entries[0].id]
+        pane.filter = "no matching file"
+        if !pane.selected.isEmpty { auditFailures.append("Filtering leaves hidden files selected for file operations") }
+        pane.filter = ""
+        pane.selection = [entries[0].id]
+        pane.query = "no matching file"
+        if !pane.selected.isEmpty { auditFailures.append("Searching leaves the old folder selection active") }
+        pane.query = ""
+        pane.sortKey = "Name"; pane.ascending = true
+        let visible = pane.displayed
+        pane.selection = [visible[0].id]
+        pane.moveSelection(by: 1, extending: true)
+        pane.moveSelection(by: 1, extending: true)
+        guard pane.selection == Set(visible.prefix(3).map(\.id)) else {
+            throw OperationFailure.message("Repeated Shift–Down stops extending the selection")
+        }
+        pane.moveSelection(by: -1, extending: true)
+        guard pane.selection == Set(visible.prefix(2).map(\.id)) else {
+            throw OperationFailure.message("Reversing Shift–Down does not shrink the range")
+        }
+        pane.selection = [visible[1].id]
+        pane.moveSelection(by: -1, extending: true)
+        pane.moveSelection(by: 1, extending: true)
+        pane.moveSelection(by: 1, extending: true)
+        guard pane.selection == Set(visible[1...2].map(\.id)) else {
+            throw OperationFailure.message("Keyboard range selection loses its anchor across direction changes")
+        }
         let defaults = UserDefaults.standard
         let oldRecent = defaults.object(forKey: "recentFolders")
         let wasRestoring = AppDelegate.shared.restoringWindows
@@ -120,6 +146,32 @@ import Foundation
               workspace.active.tabs.first?.back == [root] else {
             throw OperationFailure.message("Moving a tab must preserve its view and navigation history")
         }
+        let savedPane = PaneSnapshot(id: paneID, tabs: [sourceTab, movingTab], activeTab: sourceTab.id)
+        let duplicateTabPane = PaneSnapshot(id: paneID, tabs: [sourceTab, sourceTab], activeTab: sourceTab.id)
+        let brokenSnapshots = [
+            WorkspaceSnapshot(layout: .leaf(paneID), panes: [], active: paneID),
+            WorkspaceSnapshot(layout: .leaf(UUID()), panes: [savedPane], active: UUID()),
+            WorkspaceSnapshot(layout: .leaf(paneID), panes: [savedPane, duplicateTabPane], active: paneID)
+        ]
+        for broken in brokenSnapshots {
+            let restored = Workspace(snapshot: try JSONDecoder().decode(WorkspaceSnapshot.self, from: JSONEncoder().encode(broken)))
+            let ids = restored.panes.map(\.id)
+            guard !ids.isEmpty, Set(ids).count == ids.count, Set(restored.layout.ids) == Set(ids),
+                  restored.layout.ids.count == ids.count, ids.contains(restored.activeID),
+                  restored.panes.allSatisfy({ Set($0.tabs.map(\.id)).count == $0.tabs.count }) else {
+                auditFailures.append("Malformed saved sessions leave invalid pane/tab identities or an unusable layout")
+                continue
+            }
+            if !broken.panes.isEmpty {
+                guard restored.panes.flatMap(\.tabs).map(\.url) == broken.panes.flatMap(\.tabs).map(\.url) else {
+                    throw OperationFailure.message("Session recovery loses saved tabs")
+                }
+            }
+            restored.nextPane(1)
+            restored.preset(1)
+            guard restored.panes.count == 1 else { throw OperationFailure.message("Recovered session cannot return to one pane") }
+        }
+        guard auditFailures.isEmpty else { throw OperationFailure.message(auditFailures.joined(separator: "; ")) }
         var job = TransferJob(id: UUID(), title: "Copy")
         job.copiedBytes = 500_000_000; job.totalBytes = 1_000_000_000; job.bytesPerSecond = 100_000_000
         guard job.transferStats.contains("500 MB of 1 GB"), job.transferStats.contains("/s"), job.transferStats.contains("left") else { throw CocoaError(.validationNumberTooLarge) }

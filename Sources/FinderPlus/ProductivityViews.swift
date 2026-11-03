@@ -209,6 +209,7 @@ struct BatchRenameView: View {
 struct InfoView: View {
     let url: URL
     @State private var entry: FileEntry?
+    @State private var loadedMetadata: Metadata?
     @State private var tags = ""
     @State private var created = Date()
     @State private var modified = Date()
@@ -245,7 +246,7 @@ struct InfoView: View {
                 Section("Sharing & Permissions") {
                     ForEach(sharing, id: \.0) { name, access in LabeledContent(name, value: access) }
                 }
-            }.formStyle(.grouped)
+            }.formStyle(.grouped).disabled(loadedMetadata == nil)
             if let error { Text(error).foregroundStyle(.red).textSelection(.enabled) }
             if !message.isEmpty { Text(message).foregroundStyle(.secondary) }
             HStack {
@@ -253,24 +254,29 @@ struct InfoView: View {
                 Button("Refresh") { load() }
                 Spacer()
                 Button("Close") { dismiss() }.keyboardShortcut(.cancelAction)
-                Button("Save Metadata") { save() }.disabled(entry == nil)
+                Button("Save Metadata") { save() }.disabled(loadedMetadata == nil)
             }
         }.padding(20).frame(width: 660, height: 620).onAppear { load() }
         .task(id: url) { if entry?.isDirectory == true || (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true { let target = url; folderSize = await measuredSize([target]) } }
     }
 
     private func load() {
+        loadedMetadata = nil
+        entry = nil
+        sharing = []
+        message = ""
         do {
-            entry = try FileEntry(url: url)
-            let values = try url.resourceValues(forKeys: [.tagNamesKey, .creationDateKey, .contentModificationDateKey, .hasHiddenExtensionKey, .isSymbolicLinkKey])
-            guard values.isSymbolicLink != true else { entry = nil; throw OperationFailure.message("Editing symlink metadata is not supported; inspect its target explicitly.") }
-            tags = (values.tagNames ?? []).joined(separator: "\n")
-            created = values.creationDate ?? Date()
-            modified = values.contentModificationDate ?? Date()
-            hiddenExtension = values.hasHiddenExtension ?? false
+            let metadata = try Metadata(url)
+            let loadedEntry = try FileEntry(url: URL(fileURLWithPath: url.path))
             let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
-            locked = attributes[.immutable] as? Bool ?? false
+            tags = metadata.tags.joined(separator: "\n")
+            created = metadata.created
+            modified = metadata.modified
+            hiddenExtension = metadata.hiddenExtension
+            locked = metadata.locked
             sharing = Self.permissions(attributes, url: url)
+            entry = loadedEntry
+            loadedMetadata = metadata
             error = nil
         } catch { self.error = error.localizedDescription }
     }
@@ -280,7 +286,7 @@ struct InfoView: View {
         let mode = (attributes[.posixPermissions] as? NSNumber)?.intValue ?? 0
         func access(_ bits: Int) -> String { bits & 4 != 0 ? (bits & 2 != 0 ? "Read & Write" : "Read only") : (bits & 2 != 0 ? "Write only (Drop Box)" : "No Access") }
         let fm = FileManager.default
-        let you = fm.isWritableFile(atPath: url.path) ? "Read & Write" : fm.isReadableFile(atPath: url.path) ? "Read only" : "No Access"
+        let you = access((fm.isReadableFile(atPath: url.path) ? 4 : 0) | (fm.isWritableFile(atPath: url.path) ? 2 : 0))
         return [("You (\(NSUserName()))", you),
                 ((attributes[.ownerAccountName] as? String ?? "Owner") + " (owner)", access(mode >> 6 & 7)),
                 ((attributes[.groupOwnerAccountName] as? String ?? "Group") + " (group)", access(mode >> 3 & 7)),
@@ -289,25 +295,128 @@ struct InfoView: View {
     }
 
     private func save() {
-        let names = tags.components(separatedBy: .newlines).filter { !$0.isEmpty }
-        guard names.allSatisfy({ !$0.contains("\0") && $0.utf8.count <= 255 }) else { error = "Tag names must be at most 255 UTF-8 bytes and cannot contain NUL."; return }
-        var unique: [String] = []
-        for name in names where !unique.contains(name) { unique.append(name) }
+        guard let loadedMetadata else { return }
         do {
-            let oldAttributes = try FileManager.default.attributesOfItem(atPath: url.path)
-            let wasLocked = oldAttributes[.immutable] as? Bool ?? false
-            if wasLocked && locked { throw OperationFailure.message("Unlock this item and save first before editing other metadata.") }
-            if wasLocked { try FileManager.default.setAttributes([.immutable: false], ofItemAtPath: url.path) }
-            try FileManager.default.setAttributes([.creationDate: created, .modificationDate: modified], ofItemAtPath: url.path)
-            var values = URLResourceValues()
-            try (url as NSURL).setResourceValue(unique, forKey: .tagNamesKey)
-            values.hasHiddenExtension = hiddenExtension
-            var target = url
-            try target.setResourceValues(values)
-            try FileManager.default.setAttributes([.immutable: locked], ofItemAtPath: url.path)
-            message = "Metadata saved."
+            try loadedMetadata.save(url, tags: tags, created: created, modified: modified, locked: locked, hiddenExtension: hiddenExtension)
             load()
+            if error == nil { message = "Metadata saved." }
             NotificationCenter.default.post(name: Notification.Name("FinderPlusFilesChanged"), object: nil)
         } catch { self.error = "Metadata save failed; some earlier attributes may already have changed. Refresh to inspect: \(error.localizedDescription)"; message = "" }
+    }
+
+    static func selfCheck() throws {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory.resolvingSymlinksInPath().appendingPathComponent("FinderPlus-metadata-\(UUID().uuidString)", isDirectory: true)
+        try fm.createDirectory(at: root, withIntermediateDirectories: false)
+        let file = root.appendingPathComponent("original.txt")
+        let target = root.appendingPathComponent("target.txt")
+        let lockedFile = root.appendingPathComponent("locked.txt")
+        defer {
+            try? fm.setAttributes([.immutable: false], ofItemAtPath: lockedFile.path)
+            try? fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: target.path)
+            try? fm.removeItem(at: root)
+        }
+        try Data("original".utf8).write(to: file)
+        try Data("target".utf8).write(to: target)
+        try Data("locked".utf8).write(to: lockedFile)
+        func save(_ metadata: Metadata, at url: URL, tags: String? = nil, locked: Bool? = nil) throws {
+            try metadata.save(url, tags: tags ?? metadata.tags.joined(separator: "\n"), created: metadata.created,
+                              modified: metadata.modified, locked: locked ?? metadata.locked, hiddenExtension: metadata.hiddenExtension)
+        }
+        func reject(_ metadata: Metadata, at url: URL, tags: String? = nil) throws {
+            do { try save(metadata, at: url, tags: tags) }
+            catch { return }
+            throw OperationFailure.message("Unsafe metadata save was accepted: \(url.lastPathComponent)")
+        }
+        let original = try Metadata(file)
+        try save(original, at: file, tags: "Audit\nAudit\n")
+        let edited = try Metadata(file)
+        guard edited.tags == ["Audit"], try Data(contentsOf: file) == Data("original".utf8) else {
+            throw OperationFailure.message("Metadata save changed file contents or did not deduplicate tags.")
+        }
+        try reject(edited, at: file, tags: "bad\0tag")
+        guard try Metadata(file) == edited else { throw OperationFailure.message("Invalid tags changed metadata.") }
+        try (URL(fileURLWithPath: file.path) as NSURL).setResourceValue(["External"], forKey: .tagNamesKey)
+        let external = try Metadata(file)
+        try reject(edited, at: file)
+        guard try Metadata(file) == external else { throw OperationFailure.message("Stale metadata overwrote externally edited tags.") }
+
+        try fm.moveItem(at: file, to: root.appendingPathComponent("moved.txt"))
+        try Data("replacement".utf8).write(to: file)
+        let replacement = try Metadata(file)
+        try reject(external, at: file)
+        guard try Metadata(file) == replacement else { throw OperationFailure.message("Metadata was written to a replacement file.") }
+        try fm.removeItem(at: file)
+        let targetBefore = try Metadata(target)
+        try fm.createSymbolicLink(at: file, withDestinationURL: target)
+        try reject(replacement, at: file)
+        guard try Metadata(target) == targetBefore, try Data(contentsOf: target) == Data("target".utf8) else {
+            throw OperationFailure.message("Metadata followed a replacement symlink.")
+        }
+        try fm.removeItem(at: file)
+        if case .success = Result(catching: { try Metadata(file) }) {
+            throw OperationFailure.message("Missing item retained editable metadata.")
+        }
+        try fm.setAttributes([.immutable: true], ofItemAtPath: lockedFile.path)
+        let locked = try Metadata(lockedFile)
+        try reject(locked, at: lockedFile)
+        guard try Metadata(lockedFile) == locked else { throw OperationFailure.message("Rejected locked save changed metadata.") }
+        try save(locked, at: lockedFile, locked: false)
+        guard try !Metadata(lockedFile).locked else { throw OperationFailure.message("Explicit metadata unlock failed.") }
+
+        try fm.setAttributes([.posixPermissions: 0o200], ofItemAtPath: target.path)
+        let reported = Self.permissions(try fm.attributesOfItem(atPath: target.path), url: target)
+        guard reported[1].1 == "Write only (Drop Box)",
+              fm.isReadableFile(atPath: target.path) || !fm.isWritableFile(atPath: target.path) || reported[0].1 == "Write only (Drop Box)" else {
+            throw OperationFailure.message("Write-only permissions were reported as readable.")
+        }
+    }
+
+    private struct Metadata: Equatable {
+        let snapshot: OperationSnapshot
+        let tags: [String]
+        let created: Date
+        let modified: Date
+        let locked: Bool
+        let hiddenExtension: Bool
+
+        init(_ url: URL) throws {
+            guard let snapshot = try OperationSnapshot.capture(url) else { throw CocoaError(.fileNoSuchFile) }
+            guard snapshot.type != FileAttributeType.typeSymbolicLink.rawValue else {
+                throw OperationFailure.message("Editing symlink metadata is not supported; inspect its target explicitly.")
+            }
+            let target = URL(fileURLWithPath: url.path)
+            let values = try target.resourceValues(forKeys: [.tagNamesKey, .creationDateKey, .contentModificationDateKey, .hasHiddenExtensionKey])
+            let attributes = try FileManager.default.attributesOfItem(atPath: target.path)
+            guard let created = values.creationDate, let modified = values.contentModificationDate,
+                  try OperationSnapshot.capture(target) == snapshot else {
+                throw OperationFailure.message("Cannot read consistent metadata. Refresh before editing.")
+            }
+            self.snapshot = snapshot
+            self.tags = values.tagNames ?? []
+            self.created = created
+            self.modified = modified
+            self.locked = attributes[.immutable] as? Bool ?? false
+            self.hiddenExtension = values.hasHiddenExtension ?? false
+        }
+
+        func save(_ url: URL, tags: String, created: Date, modified: Date, locked: Bool, hiddenExtension: Bool) throws {
+            let names = tags.components(separatedBy: .newlines).filter { !$0.isEmpty }
+            guard names.allSatisfy({ !$0.contains("\0") && $0.utf8.count <= 255 }) else {
+                throw OperationFailure.message("Tag names must be at most 255 UTF-8 bytes and cannot contain NUL.")
+            }
+            var unique: [String] = []
+            for name in names where !unique.contains(name) { unique.append(name) }
+            guard try Metadata(url) == self else { throw OperationFailure.message("This item changed since it was loaded. Refresh before saving metadata.") }
+            if self.locked && locked { throw OperationFailure.message("Unlock this item and save first before editing other metadata.") }
+            if self.locked { try FileManager.default.setAttributes([.immutable: false], ofItemAtPath: url.path) }
+            try FileManager.default.setAttributes([.creationDate: created, .modificationDate: modified], ofItemAtPath: url.path)
+            try (url as NSURL).setResourceValue(unique, forKey: .tagNamesKey)
+            var values = URLResourceValues()
+            values.hasHiddenExtension = hiddenExtension
+            var target = URL(fileURLWithPath: url.path)
+            try target.setResourceValues(values)
+            try FileManager.default.setAttributes([.immutable: locked], ofItemAtPath: url.path)
+        }
     }
 }

@@ -45,9 +45,11 @@ import Combine
                     try await NaturalQuery.selfCheck()
                     try FolderComparison.selfCheck()
                     try BatchRenamePlan.selfCheck()
+                    try InfoView.selfCheck()
+                    try KeyboardShortcutsView.selfCheck()
                     try await FileOperations.selfCheck()
                     try await NearbyShare.selfCheck()
-                    print("FinderPlus self-check: PASS (search, comparison, rename, safe file operations, nearby share)")
+                    print("FinderPlus self-check: PASS (browser, metadata, shortcuts, search, comparison, rename, safe file operations, nearby share)")
                     exit(0)
                 } catch { fputs("FinderPlus self-check FAILED: \(error)\n", stderr); exit(1) }
             }
@@ -240,7 +242,7 @@ import Combine
             for item in menu.items {
                 if let original = originalKeys[item.title] { item.keyEquivalent = original.0; item.keyEquivalentModifierMask = original.1 }
                 if let custom = values[item.title] {
-                    let parts = custom.lowercased().split(separator: "+").map(String.init)
+                    let parts = KeyboardShortcutsView.shortcutParts(custom.lowercased())
                     var flags: NSEvent.ModifierFlags = []
                     if parts.contains("cmd") { flags.insert(.command) }; if parts.contains("ctrl") { flags.insert(.control) }; if parts.contains("shift") { flags.insert(.shift) }; if parts.contains("alt") || parts.contains("option") { flags.insert(.option) }
                     item.keyEquivalent = parts.last ?? ""; item.keyEquivalentModifierMask = flags
@@ -279,8 +281,7 @@ import Combine
         }
         if [123, 124, 125, 126].contains(event.keyCode) {
             if pane.mode == .columns && pane.query.isEmpty && !flags.contains(.shift) && pane.moveInColumns(event.keyCode) { return nil }
-            let files = pane.displayed
-            if !files.isEmpty { let old = files.firstIndex(where: { pane.selection.contains($0.id) }) ?? -1; let delta = event.keyCode == 123 || event.keyCode == 126 ? -1 : 1; let next = min(max(old + delta, 0), files.count - 1); if flags.contains(.shift) { pane.selection.insert(files[next].id) } else { pane.selection = [files[next].id] } }
+            pane.moveSelection(by: event.keyCode == 123 || event.keyCode == 126 ? -1 : 1, extending: flags.contains(.shift))
             return nil
         }
         if let chars = event.characters, chars.rangeOfCharacter(from: .alphanumerics) != nil {
