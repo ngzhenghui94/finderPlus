@@ -1,0 +1,274 @@
+import AppKit
+import SwiftUI
+import Combine
+
+struct FileEntry: Identifiable, Hashable {
+    var id: String { url.path }
+    let url: URL
+    let name: String
+    let isDirectory: Bool
+    let size: Int64
+    let modified: Date
+    let created: Date
+    let kind: String
+    let tags: [String]
+    let cloudStatus: String
+
+    init(url: URL) throws {
+        let values = try url.resourceValues(forKeys: [.isDirectoryKey, .isPackageKey, .fileSizeKey, .contentModificationDateKey, .creationDateKey, .localizedTypeDescriptionKey, .tagNamesKey])
+        self.url = url
+        name = url.lastPathComponent
+        isDirectory = values.isDirectory == true && values.isPackage != true
+        size = Int64(values.fileSize ?? 0)
+        modified = values.contentModificationDate ?? .distantPast
+        created = values.creationDate ?? .distantPast
+        kind = values.localizedTypeDescription ?? (isDirectory ? "Folder" : url.pathExtension.uppercased() + " file")
+        tags = values.tagNames ?? []
+        cloudStatus = CloudLocations.status(url)
+    }
+}
+
+enum BrowserMode: String, CaseIterable, Codable {
+    case icons = "Icons", list = "List", columns = "Columns", gallery = "Gallery"
+    var symbol: String {
+        switch self { case .icons: return "square.grid.2x2"; case .list: return "list.bullet"; case .columns: return "rectangle.split.3x1"; case .gallery: return "rectangle.bottomthird.inset.filled" }
+    }
+}
+
+enum FileGrouping: String, CaseIterable, Codable {
+    case none = "None", kind = "Kind", modified = "Date Modified", size = "Size", tags = "Tags"
+    /// Groups keep the incoming (already sorted) order inside each group.
+    func groups(_ entries: [FileEntry], now: Date = Date(), calendar: Calendar = .current) -> [(name: String, entries: [FileEntry])] {
+        guard self != .none else { return [("", entries)] }
+        var buckets: [String: (rank: Int, entries: [FileEntry])] = [:]
+        for entry in entries {
+            let key = bucket(entry, now: now, calendar: calendar)
+            buckets[key.name, default: (key.rank, [])].entries.append(entry)
+        }
+        return buckets.sorted { $0.value.rank != $1.value.rank ? $0.value.rank < $1.value.rank : $0.key.localizedStandardCompare($1.key) == .orderedAscending }.map { ($0.key, $0.value.entries) }
+    }
+    private func bucket(_ entry: FileEntry, now: Date, calendar: Calendar) -> (rank: Int, name: String) {
+        switch self {
+        case .none: return (0, "")
+        case .kind: return (0, entry.kind)
+        case .tags: return entry.tags.first.map { (0, $0) } ?? (1, "No Tags")
+        case .size:
+            if entry.isDirectory { return (5, "Folders") }
+            switch entry.size {
+            case 1_000_000_000...: return (0, "Over 1 GB")
+            case 100_000_000...: return (1, "100 MB to 1 GB")
+            case 1_000_000...: return (2, "1 MB to 100 MB")
+            case 100_000...: return (3, "100 KB to 1 MB")
+            default: return (4, "Under 100 KB")
+            }
+        case .modified:
+            let days = calendar.dateComponents([.day], from: calendar.startOfDay(for: entry.modified), to: calendar.startOfDay(for: now)).day ?? 0
+            switch days {
+            case ...0: return (0, "Today")
+            case 1: return (1, "Yesterday")
+            case 2...7: return (2, "Previous 7 Days")
+            case 8...30: return (3, "Previous 30 Days")
+            default:
+                let year = calendar.component(.year, from: entry.modified)
+                return (4 + max(0, calendar.component(.year, from: now) - year), String(year))
+            }
+        }
+    }
+}
+
+struct BrowserTab: Identifiable, Codable {
+    var id = UUID()
+    var url: URL
+    var mode: BrowserMode = .list
+    var back: [URL] = []
+    var forward: [URL] = []
+}
+
+struct PaneSnapshot: Codable {
+    var id: UUID
+    var tabs: [BrowserTab]
+    var activeTab: UUID
+}
+
+indirect enum PaneLayout: Codable {
+    case leaf(UUID)
+    case split(vertical: Bool, first: PaneLayout, second: PaneLayout)
+    var ids: [UUID] {
+        switch self { case .leaf(let id): return [id]; case .split(_, let a, let b): return a.ids + b.ids }
+    }
+    func splitting(_ id: UUID, with new: UUID, vertical: Bool, before: Bool = false) -> PaneLayout {
+        switch self {
+        case .leaf(let current):
+            guard current == id else { return self }
+            return .split(vertical: vertical, first: .leaf(before ? new : id), second: .leaf(before ? id : new))
+        case .split(let axis, let a, let b): return .split(vertical: axis, first: a.splitting(id, with: new, vertical: vertical, before: before), second: b.splitting(id, with: new, vertical: vertical, before: before))
+        }
+    }
+    func removing(_ id: UUID) -> PaneLayout? {
+        switch self {
+        case .leaf(let current): return current == id ? nil : self
+        case .split(let axis, let a, let b):
+            let left = a.removing(id), right = b.removing(id)
+            if let left, let right { return .split(vertical: axis, first: left, second: right) }
+            return left ?? right
+        }
+    }
+}
+
+struct WorkspaceSnapshot: Codable {
+    var layout: PaneLayout
+    var panes: [PaneSnapshot]
+    var active: UUID
+}
+
+struct SidebarFavorite: Identifiable, Codable {
+    var id = UUID()
+    var name: String
+    var url: URL
+    var group: String
+}
+struct SavedSearch: Identifiable, Codable {
+    var id = UUID()
+    var name: String
+    var query: String
+    var roots: [URL]
+}
+
+@MainActor final class BrowserPane: ObservableObject, Identifiable {
+    let id: UUID
+    @Published var tabs: [BrowserTab]
+    @Published var activeTab: UUID
+    @Published var entries: [FileEntry] = []
+    @Published var selection: Set<String> = []
+    @Published var error = ""
+    @Published var loading = false
+    @Published var query = ""
+    @Published var filter = ""
+    @Published var searchAllRoots = false
+    @Published var savedSearchRoots: [URL]?
+    var searchRoots: [URL] { savedSearchRoots ?? (searchAllRoots ? AppPreferences.shared.searchRoots : [url]) }
+    @Published var sortKey = "Name"
+    @Published var ascending = true
+    @Published var columnFolders: [URL] = []
+    @Published var columnEntries: [[FileEntry]] = []
+    let search = SearchService()
+    private var generation = UUID()
+    private var watcher: DispatchSourceFileSystemObject?
+    private var searchTimer: Timer?
+    private var searchObservation: AnyCancellable?
+    var changed: (() -> Void)?
+    var url: URL { tabs.first(where: { $0.id == activeTab })?.url ?? FileManager.default.homeDirectoryForCurrentUser }
+    var mode: BrowserMode {
+        get { tabs.first(where: { $0.id == activeTab })?.mode ?? .list }
+        set { guard let index = tabs.firstIndex(where: { $0.id == activeTab }) else { return }; tabs[index].mode = newValue; changed?() }
+    }
+    init(snapshot: PaneSnapshot? = nil, url: URL = FileManager.default.homeDirectoryForCurrentUser) {
+        id = snapshot?.id ?? UUID()
+        let tab = BrowserTab(url: url)
+        tabs = snapshot?.tabs.isEmpty == false ? snapshot!.tabs : [tab]
+        activeTab = snapshot?.activeTab ?? tab.id
+        if !tabs.contains(where: { $0.id == activeTab }) { activeTab = tabs[0].id }
+        searchObservation = search.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }
+    }
+    var snapshot: PaneSnapshot { PaneSnapshot(id: id, tabs: tabs, activeTab: activeTab) }
+    var canGoBack: Bool { tabs.first(where: { $0.id == activeTab })?.back.isEmpty == false }
+    var canGoForward: Bool { tabs.first(where: { $0.id == activeTab })?.forward.isEmpty == false }
+    var selectionAnchor: String?
+    var selected: [URL] { selection.sorted().map { URL(fileURLWithPath: $0) } }
+    var shown: [FileEntry] { sorted(query.isEmpty ? entries : search.results) }
+    func sorted(_ values: [FileEntry]) -> [FileEntry] {
+        values.filter { filter.isEmpty || $0.name.localizedCaseInsensitiveContains(filter) }.sorted {
+            if AppPreferences.shared.foldersFirst && $0.isDirectory != $1.isDirectory { return $0.isDirectory }
+            let less: Bool
+            switch sortKey {
+            case "Modified": less = $0.modified == $1.modified ? $0.name < $1.name : $0.modified < $1.modified
+            case "Size": less = $0.size == $1.size ? $0.name < $1.name : $0.size < $1.size
+            case "Kind": less = $0.kind == $1.kind ? $0.name < $1.name : $0.kind < $1.kind
+            default:
+                let order = $0.name.localizedStandardCompare($1.name)
+                less = order == .orderedSame ? $0.id < $1.id : order == .orderedAscending
+            }
+            return ascending ? less : !less && $0.id != $1.id
+        }
+    }
+    func navigate(_ target: URL, record: Bool = true) {
+        var directory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: target.path, isDirectory: &directory), directory.boolValue else { error = "This folder is unavailable: \(target.path)"; return }
+        guard let index = tabs.firstIndex(where: { $0.id == activeTab }) else { return }
+        if record && target != url { tabs[index].back.append(url); tabs[index].forward = [] }
+        tabs[index].url = target.standardizedFileURL
+        query = ""; filter = ""; selection = []; savedSearchRoots = nil; search.cancel()
+        load(); changed?()
+    }
+    func history(_ backward: Bool) {
+        guard let i = tabs.firstIndex(where: { $0.id == activeTab }) else { return }
+        if backward, let next = tabs[i].back.popLast() { tabs[i].forward.append(url); navigate(next, record: false) }
+        else if !backward, let next = tabs[i].forward.popLast() { tabs[i].back.append(url); navigate(next, record: false) }
+    }
+    func newTab(_ target: URL? = nil) {
+        let tab = BrowserTab(url: target ?? url, mode: mode)
+        tabs.append(tab); activeTab = tab.id; query = ""; savedSearchRoots = nil; filter = ""; selection = []; search.cancel(); load(); changed?()
+    }
+    func closeTab(_ id: UUID) {
+        guard tabs.count > 1 else { return }
+        tabs.removeAll { $0.id == id }
+        if activeTab == id { activeTab = tabs.last!.id; query = ""; savedSearchRoots = nil; filter = ""; selection = []; search.cancel(); load() }
+        changed?()
+    }
+    func selectTab(_ id: UUID) { activeTab = id; query = ""; savedSearchRoots = nil; filter = ""; selection = []; search.cancel(); load(); changed?() }
+    func load() {
+        generation = UUID(); let token = generation, folder = url, hidden = AppPreferences.shared.showHidden
+        if entries.first?.url.deletingLastPathComponent().standardizedFileURL != folder.standardizedFileURL { entries = []; selectionAnchor = nil }
+        loading = true; error = ""; columnFolders = [folder]; columnEntries = []
+        Task {
+            let result = await Task.detached(priority: .userInitiated) { () -> Result<[FileEntry], Error> in
+                Result { try FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: [.isDirectoryKey, .fileSizeKey, .contentModificationDateKey], options: hidden ? [] : [.skipsHiddenFiles]).map { try FileEntry(url: $0) } }
+            }.value
+            guard generation == token else { return }
+            switch result { case .success(let files): entries = files; columnEntries = [files]; case .failure(let failure): entries = []; error = failure.localizedDescription }
+            loading = false
+            watch(folder)
+        }
+    }
+    private func watch(_ folder: URL) {
+        watcher?.cancel(); watcher = nil
+        let fd = open(folder.path, O_EVTONLY)
+        guard fd >= 0 else { return }
+        let source = DispatchSource.makeFileSystemObjectSource(fileDescriptor: fd, eventMask: [.write, .delete, .rename, .attrib], queue: .main)
+        source.setEventHandler { [weak self] in self?.load() }
+        source.setCancelHandler { close(fd) }; watcher = source; source.resume()
+    }
+    func runSearch() {
+        searchTimer?.invalidate()
+        guard !query.isEmpty else { search.cancel(); return }
+        searchTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: false) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                let preferences = AppPreferences.shared
+                let roots = self.searchRoots
+                let approved = contentScopeApproved(roots)
+                self.search.search(self.query, roots: roots, includeHidden: preferences.showHidden, contentEnabled: preferences.contentEnabled && approved, ocrEnabled: preferences.ocrEnabled && approved)
+            }
+        }
+    }
+    func chooseColumn(_ entry: FileEntry, at index: Int) {
+        selection = [entry.id]
+        columnFolders = Array(columnFolders.prefix(index + 1)); columnEntries = Array(columnEntries.prefix(index + 1))
+        guard entry.isDirectory else { return }
+        do {
+            let files = try FileManager.default.contentsOfDirectory(at: entry.url, includingPropertiesForKeys: nil, options: AppPreferences.shared.showHidden ? [] : [.skipsHiddenFiles]).map { try FileEntry(url: $0) }
+            columnFolders.append(entry.url); columnEntries.append(files)
+        } catch { self.error = error.localizedDescription }
+    }
+    deinit { watcher?.cancel(); searchTimer?.invalidate() }
+}
+
+@MainActor func contentScopeApproved(_ roots: [URL]) -> Bool {
+    roots.allSatisfy { root in
+        let path = root.resolvingSymlinksInPath().standardizedFileURL.path
+        return AppPreferences.shared.searchRoots.contains { approved in
+            let base = approved.resolvingSymlinksInPath().standardizedFileURL.path
+            return path == base || path.hasPrefix(base == "/" ? "/" : base + "/")
+        }
+    }
+}

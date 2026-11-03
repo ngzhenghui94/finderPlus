@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleExecutable</key><string>FinderPlus</string>
+<key>CFBundleIdentifier</key><string>com.icelemontees.finderplus</string>
+<key>CFBundleName</key><string>FinderPlus</string>
+<key>CFBundleDisplayName</key><string>FinderPlus</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+<key>CFBundleShortVersionString</key><string>1.0</string>
+<key>CFBundleVersion</key><string>1</string>
+<key>CFBundleIconFile</key><string>AppIcon</string>
+<key>LSMinimumSystemVersion</key><string>15.0</string>
+<key>NSHighResolutionCapable</key><true/>
+<key>NSPrincipalClass</key><string>NSApplication</string>
+<key>NSDocumentsFolderUsageDescription</key><string>Browse and manage the Documents folder you choose.</string>
+<key>NSDesktopFolderUsageDescription</key><string>Browse and manage the Desktop folder you choose.</string>
+<key>NSDownloadsFolderUsageDescription</key><string>Browse and manage your downloaded files.</string>
+<key>NSNetworkVolumesUsageDescription</key><string>Browse and manage network folders you choose.</string>
+<key>NSRemovableVolumesUsageDescription</key><string>Browse and manage removable drives you choose.</string>
+<key>NSLocalNetworkUsageDescription</key><string>Find nearby Macs running FinderPlus and send files to them.</string>
+<key>NSBonjourServices</key><array><string>_finderplus-drop._tcp</string></array>
+</dict></plist>

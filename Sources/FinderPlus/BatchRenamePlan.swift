@@ -1,0 +1,92 @@
+import Foundation
+
+struct BatchRenamePlan {
+    enum Mode: String, CaseIterable { case replace = "Replace text", add = "Add text", number = "Number" }
+    struct Options: Equatable {
+        var mode: Mode = .replace
+        var find = ""
+        var replacement = ""
+        var prefix = ""
+        var suffix = ""
+        var start = 1
+        var digits = 3
+        var preserveExtension = true
+    }
+    struct Change: Identifiable {
+        let url: URL
+        let name: String
+        var id: String { url.path }
+        var changed: Bool { url.lastPathComponent != name }
+    }
+    struct Failure: LocalizedError {
+        let message: String
+        var errorDescription: String? { message }
+    }
+
+    static func make(urls: [URL], options: Options) throws -> [Change] {
+        guard !urls.isEmpty else { throw Failure(message: "Select at least one item.") }
+        guard options.start >= 0, (1...12).contains(options.digits), options.start <= Int.max - urls.count else { throw Failure(message: "Use a nonnegative starting number and 1–12 padding digits.") }
+        if options.mode == .replace && options.find.isEmpty { throw Failure(message: "Enter the text to replace.") }
+        let changes = try urls.enumerated().map { index, url -> Change in
+            let isDirectory = try url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory == true
+            let ext = options.preserveExtension && !isDirectory ? url.pathExtension : ""
+            let original = ext.isEmpty ? url.lastPathComponent : url.deletingPathExtension().lastPathComponent
+            let stem: String
+            switch options.mode {
+            case .replace: stem = original.replacingOccurrences(of: options.find, with: options.replacement)
+            case .add: stem = options.prefix + original + options.suffix
+            case .number:
+                let number = String(options.start + index)
+                stem = options.prefix + String(repeating: "0", count: max(0, options.digits - number.count)) + number + options.suffix
+            }
+            return Change(url: url, name: ext.isEmpty ? stem : stem + "." + ext)
+        }
+        try validate(changes)
+        return changes
+    }
+
+    static func validate(_ changes: [Change]) throws {
+        var destinations = Set<String>()
+        var sources = Set<String>()
+        for change in changes {
+            let url = change.url.standardizedFileURL
+            guard url.isFileURL, sources.insert(url.path).inserted else { throw Failure(message: "Duplicate or invalid source: \(url.path)") }
+            guard !change.name.isEmpty, change.name != ".", change.name != "..", !change.name.contains("/"), !change.name.contains(":"), !change.name.contains("\0"), change.name.utf8.count <= 255 else { throw Failure(message: "Invalid filename: \(change.name)") }
+            if change.changed && url.lastPathComponent.precomposedStringWithCanonicalMapping.lowercased() == change.name.precomposedStringWithCanonicalMapping.lowercased() {
+                throw Failure(message: "Case-only and Unicode-normalization-only renames are not supported: \(change.name)")
+            }
+            let target = url.deletingLastPathComponent().appendingPathComponent(change.name)
+            // Conservative on case-sensitive disks too: never risk case-folding collisions on other volumes.
+            let key = target.path.precomposedStringWithCanonicalMapping.lowercased()
+            guard destinations.insert(key).inserted else { throw Failure(message: "Several items would become \(change.name).") }
+            if change.changed && FileManager.default.fileExists(atPath: target.path) {
+                throw Failure(message: "The destination already exists: \(target.path). Rename cycles and case-only renames are not supported.")
+            }
+            guard FileManager.default.fileExists(atPath: url.path) else { throw Failure(message: "Source is missing: \(url.path)") }
+        }
+        let paths = changes.map { $0.url.standardizedFileURL.path }
+        for path in paths {
+            if paths.contains(where: { path.hasPrefix($0 + "/") }) { throw Failure(message: "Do not rename a folder and one of its descendants in the same batch.") }
+        }
+    }
+
+    static func selfCheck() throws {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory.appendingPathComponent("FinderPlus-Rename-\(UUID().uuidString)")
+        try fm.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: root) }
+        let a = root.appendingPathComponent("a.txt"), b = root.appendingPathComponent("b.txt")
+        try Data().write(to: a)
+        try Data().write(to: b)
+        var options = Options()
+        options.mode = .number
+        options.prefix = "Photo-"
+        let plan = try make(urls: [a, b], options: options)
+        guard plan.map(\.name) == ["Photo-001.txt", "Photo-002.txt"] else { throw Failure(message: "Numbered rename self-check failed") }
+        var rejected = 0
+        for changes in [[Change(url: a, name: "b.txt")], [Change(url: a, name: "../bad")], [Change(url: a, name: "same"), Change(url: b, name: "SAME")]] {
+            do { try validate(changes) } catch { rejected += 1 }
+        }
+        guard rejected == 3 else { throw Failure(message: "Rename collision self-check failed") }
+    }
+}
