@@ -31,6 +31,16 @@ private extension SearchPredicate {
         default: return false
         }
     }
+    /// Spotlight and xattr lookups cost an IPC per file; fetch them only for filters that read them.
+    var needsMetadata: Bool {
+        switch self {
+        case .source, .date(.downloaded, _, _): return true
+        case .kind(let kind): return kind.hasPrefix("screenshot")
+        case .all(let values), .any(let values): return values.contains { $0.needsMetadata }
+        case .not(let value): return value.needsMetadata
+        default: return false
+        }
+    }
 }
 
 struct SearchPlan {
@@ -502,8 +512,8 @@ private final class SearchMatcher {
         // shortcut: bounded extraction keeps interactive search responsive; use a dedicated indexer for larger documents.
         if (contentEnabled || ocrEnabled) && ext == "pdf" {
             guard fileSize <= 32 * 1024 * 1024 else { note("\(url.lastPathComponent): PDF exceeds the 32 MiB search limit."); return nil }
-            guard let document = PDFDocument(url: url) else { throw SearchError.message("Cannot read PDF (possibly encrypted).") }
-            guard !document.isLocked else { throw SearchError.message("PDF is password protected.") }
+            guard let document = PDFDocument(url: url) else { throw OperationFailure.message("Cannot read PDF (possibly encrypted).") }
+            guard !document.isLocked else { throw OperationFailure.message("PDF is password protected.") }
             let pageLimit = contentEnabled ? 200 : 20
             if document.pageCount > pageLimit { note("\(url.lastPathComponent): only the first \(pageLimit) PDF pages were searched.") }
             if ocrEnabled && document.pageCount > 20 { note("\(url.lastPathComponent): PDF OCR is limited to the first 20 pages.") }
@@ -529,13 +539,13 @@ private final class SearchMatcher {
             let data = try Data(contentsOf: url, options: .mappedIfSafe)
             if let text = String(data: data, encoding: .utf8) { return text }
             if data.starts(with: [0xFF, 0xFE]) || data.starts(with: [0xFE, 0xFF]), let text = String(data: data, encoding: .utf16) { return text }
-            throw SearchError.message("Unsupported text encoding; use UTF-8 or BOM-marked UTF-16.")
+            throw OperationFailure.message("Unsupported text encoding; use UTF-8 or BOM-marked UTF-16.")
         }
         if ocrEnabled && type?.conforms(to: .image) == true {
             guard fileSize <= 32 * 1024 * 1024 else { note("\(url.lastPathComponent): image exceeds the 32 MiB OCR limit."); return nil }
             guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
                   let image = CGImageSourceCreateThumbnailAtIndex(source, 0, [kCGImageSourceCreateThumbnailFromImageAlways: true, kCGImageSourceThumbnailMaxPixelSize: 4096, kCGImageSourceCreateThumbnailWithTransform: true] as CFDictionary) else {
-                throw SearchError.message("Cannot decode image for OCR.")
+                throw OperationFailure.message("Cannot decode image for OCR.")
             }
             return try recognize(image)
         }
@@ -554,11 +564,6 @@ private final class SearchMatcher {
         try Task.checkCancellation()
         return request.results?.compactMap { $0.topCandidates(1).first?.string }.joined(separator: "\n") ?? ""
     }
-}
-
-private enum SearchError: LocalizedError {
-    case message(String)
-    var errorDescription: String? { if case .message(let text) = self { return text }; return nil }
 }
 
 struct SearchOutput {
@@ -594,7 +599,9 @@ actor LocalSearchIndex {
         let scopedRoots = acceptedRoots.filter { $0.startAccessingSecurityScopedResource() }
         defer { scopedRoots.forEach { $0.stopAccessingSecurityScopedResource() } }
         // Retain metadata only for currently approved roots; never persist content or OCR text.
-        let allowedKeys = Set(acceptedRoots.map { $0.path + (includeHidden ? "|hidden" : "|visible") })
+        let needsMetadata = plan.predicate.needsMetadata
+        func cacheKey(_ root: URL, metadata: Bool) -> String { root.path + (includeHidden ? "|hidden" : "|visible") + (metadata ? "|meta" : "") }
+        let allowedKeys = Set(acceptedRoots.flatMap { [cacheKey($0, metadata: false), cacheKey($0, metadata: true)] })
         cache = cache.filter { allowedKeys.contains($0.key) }
         guard !plan.predicate.needsContent || contentEnabled || ocrEnabled else {
             return SearchOutput(entries: [], issues: ["Content filters require the Text/PDF or OCR opt-in in Settings."], usedCache: false)
@@ -602,7 +609,7 @@ actor LocalSearchIndex {
         let keys: [URLResourceKey] = [.isSymbolicLinkKey, .isDirectoryKey, .isPackageKey, .isUbiquitousItemKey, .ubiquitousItemDownloadingStatusKey, .volumeIsLocalKey]
         for root in acceptedRoots {
             try Task.checkCancellation()
-            let key = root.path + (includeHidden ? "|hidden" : "|visible")
+            let key = cacheKey(root, metadata: needsMetadata)
             do {
                 let rootValues = try root.resourceValues(forKeys: Set(keys))
                 guard isLocallyAvailable(root, values: rootValues) else {
@@ -643,12 +650,12 @@ actor LocalSearchIndex {
                     let entry = try FileEntry(url: url)
                     var record = SearchRecord(entry: entry)
                     record.local = local
-                    if local, let item = MDItemCreate(kCFAllocatorDefault, url.path as CFString) {
+                    if local, needsMetadata, let item = MDItemCreate(kCFAllocatorDefault, url.path as CFString) {
                         record.sources = MDItemCopyAttribute(item, kMDItemWhereFroms) as? [String] ?? []
                         record.downloaded = MDItemCopyAttribute(item, "kMDItemDownloadedDate" as CFString) as? Date
                         record.screenshot = (MDItemCopyAttribute(item, "kMDItemIsScreenCapture" as CFString) as? Bool) ?? false
                     }
-                    if local && record.sources.isEmpty { record.sources = recordedDownloadSources(url) }
+                    if local && needsMetadata && record.sources.isEmpty { record.sources = recordedDownloadSources(url) }
                     rootRecords.append(record)
                 } catch {
                     enumerator.skipDescendants()
@@ -659,7 +666,8 @@ actor LocalSearchIndex {
             cache[key] = Snapshot(date: Date(), records: rootRecords, issues: scanIssues)
             records += rootRecords; issues += scanIssues
         }
-        let matcher = SearchMatcher(plan: plan, contentEnabled: contentEnabled, ocrEnabled: ocrEnabled)
+        // OCR is costly per image: plain words search names and text/PDF contents, only content: filters run OCR.
+        let matcher = SearchMatcher(plan: plan, contentEnabled: contentEnabled, ocrEnabled: ocrEnabled && plan.predicate.needsContent)
         var entries: [FileEntry] = []
         var seen = Set<String>()
         for record in records {
@@ -700,10 +708,7 @@ actor LocalSearchIndex {
         if values?.isUbiquitousItem == true {
             guard values?.ubiquitousItemDownloadingStatus == .current || values?.ubiquitousItemDownloadingStatus == .downloaded else { return false }
         }
-        var info = stat()
-        guard lstat(url.path, &info) == 0 else { return false }
-        // Darwin's SF_DATALESS marks File Provider / iCloud placeholders; reading could hydrate them.
-        return info.st_flags & 0x40000000 == 0 && info.st_mode & S_IFMT != S_IFLNK
+        return CloudLocations.isReadableLocally(url)
     }
 }
 

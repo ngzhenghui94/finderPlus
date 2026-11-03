@@ -449,8 +449,7 @@ final class PreviewHostView: NSView {
     }
 }
 func localPreviewAllowed(_ url: URL) -> Bool {
-    var info = stat()
-    guard lstat(url.path, &info) == 0, info.st_flags & 0x40000000 == 0, info.st_mode & S_IFMT != S_IFLNK else { return false }
+    guard CloudLocations.isReadableLocally(url) else { return false }
     let values = try? url.resourceValues(forKeys: [.ubiquitousItemDownloadingStatusKey])
     return values?.ubiquitousItemDownloadingStatus != .notDownloaded
 }

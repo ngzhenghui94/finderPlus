@@ -432,8 +432,11 @@ final class FileOperations: ObservableObject {
         try require(!fm.fileExists(atPath: destination.appendingPathComponent("new").path), "sync parent undo")
         let moveDestination = root.appendingPathComponent("moved")
         try fm.createDirectory(at: moveDestination, withIntermediateDirectories: false)
+        func heldCopies() throws -> Int { try fm.contentsOfDirectory(atPath: source.path).filter { $0.hasPrefix(".FinderPlus-") }.count }
+        let heldBefore = try heldCopies()
         try await run(.transfer([file], moveDestination, true))
-        try require(!fm.fileExists(atPath: file.path), "move removes source only after copy")
+        try require(!fm.fileExists(atPath: file.path) && fm.fileExists(atPath: moveDestination.appendingPathComponent(file.lastPathComponent).path), "move removes source")
+        try require(try heldCopies() == heldBefore, "same-disk move is a rename that keeps no hidden copy")
         try await run(.undo)
         try require(fm.fileExists(atPath: file.path), "move undo restores source")
         let replacement = root.appendingPathComponent("replacement")
@@ -577,6 +580,45 @@ final class FileOperations: ObservableObject {
         try require(clearedLedger.records.isEmpty && (clearedLedger.storage ?? []).isEmpty &&
                     fm.fileExists(atPath: cleanupParent.appendingPathComponent("visible").path) &&
                     fm.fileExists(atPath: simulatedTrash.path), "cleanup recovery clears history without moving current files")
+        // A crash leaves a step marked pending; recovery must find out on disk whether its move happened.
+        for movedBeforeCrash in [true, false] {
+            let folder = root.appendingPathComponent("pending-\(movedBeforeCrash)")
+            try fm.createDirectory(at: folder, withIntermediateDirectories: false)
+            let before = folder.appendingPathComponent("before"), after = folder.appendingPathComponent("after")
+            try Data("pending fixture".utf8).write(to: before)
+            let pendingJournal = root.appendingPathComponent("pending-journal-\(movedBeforeCrash)")
+            try await OperationsEngine(directory: pendingJournal).execute(.rename([(before, "after")]), id: UUID(), title: "Pending fixture", control: OperationControl(), review: keep, progress: progress)
+            if !movedBeforeCrash { try fm.moveItem(at: after, to: before) }
+            let pendingFile = pendingJournal.appendingPathComponent("operations.json")
+            var crashed = try JSONDecoder().decode(OperationJournal.self, from: Data(contentsOf: pendingFile))
+            crashed.records[0].state = "working"
+            crashed.records[0].pending = 0
+            crashed.records[0].pendingForward = true
+            crashed.records[0].moves[0].applied = false
+            try JSONEncoder().encode(crashed).write(to: pendingFile, options: .atomic)
+            try await OperationsEngine(directory: pendingJournal).execute(.recover(crashed.records[0].id), id: UUID(), title: "Recover pending fixture", control: OperationControl(), review: keep, progress: progress)
+            try require(fm.fileExists(atPath: before.path) && !fm.fileExists(atPath: after.path), "recovery of a pending step (moved before crash: \(movedBeforeCrash))")
+        }
+        // The journal log is replayed after a crash: a matching header, one change, then a torn last line.
+        let logFolder = root.appendingPathComponent("pending-journal-true")
+        let snapshotData = try Data(contentsOf: logFolder.appendingPathComponent("operations.json"))
+        let base = try JSONDecoder().decode(OperationJournal.self, from: snapshotData)
+        var changed = base
+        changed.records[0].title = "Renamed fixture"
+        changed.records[0].moves.append(changed.records[0].moves[0])
+        changed.records.append(OperationRecord(id: UUID(), title: "Logged fixture", state: "cancelled"))
+        let patch = JournalPatch(from: base, to: changed)
+        var replayed = base
+        try JSONDecoder().decode(JournalPatch.self, from: JSONEncoder().encode(patch)).apply(to: &replayed)
+        var log = try JSONEncoder().encode(OperationsEngine.digest(snapshotData)) + [0x0A]
+        log += try JSONEncoder().encode(patch) + [0x0A] + Data("{\"torn".utf8)
+        try log.write(to: logFolder.appendingPathComponent("operations.log"))
+        let replayedScope = try await OperationsEngine(directory: logFolder).historyScope()
+        try require(replayed == changed && replayedScope.recordCount == changed.records.count, "journal log replays after a crash and ignores a torn line")
+        // A rewritten snapshot (as after compaction) makes the old log stale; replaying it would apply changes twice.
+        try JSONEncoder().encode(base).write(to: logFolder.appendingPathComponent("operations.json"), options: .atomic)
+        let staleScope = try await OperationsEngine(directory: logFolder).historyScope()
+        try require(staleScope.recordCount == base.records.count, "a log for an older snapshot is ignored")
     }
 }
 
@@ -638,7 +680,7 @@ struct OperationsPanel: View {
                     Button("Clear messages") { operations.clearProblems() }
                 }
             }
-            Text("Copies are staged and fingerprint-verified before commit. Undo data is retained in hidden .FinderPlus folders beside affected items; these consume disk space and are never automatically purged. Do not delete them while you need Undo. Folders containing retained storage cannot be moved or renamed. Changed files are never overwritten by Undo or recovery. Trash recovery requires the item to remain in Trash. ZIP creation pauses between process slices; rollback and network/provider calls may finish before pausing.")
+            Text("Moves within one disk are instant renames. Copies and moves between disks are staged and fingerprint-verified before commit. Undo data is retained in hidden .FinderPlus folders beside affected items; these consume disk space and are never automatically purged. Do not delete them while you need Undo. Folders containing retained storage cannot be moved or renamed. Changed files are never overwritten by Undo or recovery. Trash recovery requires the item to remain in Trash. ZIP creation pauses between process slices; rollback and network/provider calls may finish before pausing.")
                 .font(.caption).foregroundStyle(.secondary)
             Text("Clear File Operation History releases retained storage to system Trash after verification and removes the folder-movement restriction. All app Undo, Redo, and Put Back records are lost. Modified or unverified storage is left untouched.")
                 .font(.caption).foregroundStyle(.secondary)

@@ -154,6 +154,9 @@ struct SavedSearch: Identifiable, Codable {
     let search = SearchService()
     private var generation = UUID()
     private var watcher: DispatchSourceFileSystemObject?
+    private var reloadTimer: Timer?
+    private var loadTask: Task<Result<[FileEntry], Error>, Never>?
+    private var columnToken = UUID()
     private var searchTimer: Timer?
     private var searchObservation: AnyCancellable?
     var changed: (() -> Void)?
@@ -219,11 +222,14 @@ struct SavedSearch: Identifiable, Codable {
     func load() {
         generation = UUID(); let token = generation, folder = url, hidden = AppPreferences.shared.showHidden
         if entries.first?.url.deletingLastPathComponent().standardizedFileURL != folder.standardizedFileURL { entries = []; selectionAnchor = nil }
-        loading = true; error = ""; columnFolders = [folder]; columnEntries = []
+        loading = true; error = ""; columnFolders = [folder]; columnEntries = []; columnToken = UUID()
+        loadTask?.cancel()
+        let work = Task.detached(priority: .userInitiated) { () -> Result<[FileEntry], Error> in
+            Result { try FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: [.isDirectoryKey, .fileSizeKey, .contentModificationDateKey], options: hidden ? [] : [.skipsHiddenFiles]).map { try Task.checkCancellation(); return try FileEntry(url: $0) } }
+        }
+        loadTask = work
         Task {
-            let result = await Task.detached(priority: .userInitiated) { () -> Result<[FileEntry], Error> in
-                Result { try FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: [.isDirectoryKey, .fileSizeKey, .contentModificationDateKey], options: hidden ? [] : [.skipsHiddenFiles]).map { try FileEntry(url: $0) } }
-            }.value
+            let result = await work.value
             guard generation == token else { return }
             switch result { case .success(let files): entries = files; columnEntries = [files]; case .failure(let failure): entries = []; error = failure.localizedDescription }
             loading = false
@@ -235,7 +241,11 @@ struct SavedSearch: Identifiable, Codable {
         let fd = open(folder.path, O_EVTONLY)
         guard fd >= 0 else { return }
         let source = DispatchSource.makeFileSystemObjectSource(fileDescriptor: fd, eventMask: [.write, .delete, .rename, .attrib], queue: .main)
-        source.setEventHandler { [weak self] in self?.load() }
+        // Coalesce bursts (a copy into this folder fires an event per file) into one reload.
+        source.setEventHandler { [weak self] in
+            self?.reloadTimer?.invalidate()
+            self?.reloadTimer = Timer.scheduledTimer(withTimeInterval: 0.3, repeats: false) { [weak self] _ in Task { @MainActor in self?.load() } }
+        }
         source.setCancelHandler { close(fd) }; watcher = source; source.resume()
     }
     func runSearch() {
@@ -254,13 +264,18 @@ struct SavedSearch: Identifiable, Codable {
     func chooseColumn(_ entry: FileEntry, at index: Int) {
         selection = [entry.id]
         columnFolders = Array(columnFolders.prefix(index + 1)); columnEntries = Array(columnEntries.prefix(index + 1))
+        let token = UUID(); columnToken = token
         guard entry.isDirectory else { return }
-        do {
-            let files = try FileManager.default.contentsOfDirectory(at: entry.url, includingPropertiesForKeys: nil, options: AppPreferences.shared.showHidden ? [] : [.skipsHiddenFiles]).map { try FileEntry(url: $0) }
-            columnFolders.append(entry.url); columnEntries.append(files)
-        } catch { self.error = error.localizedDescription }
+        let folder = entry.url, hidden = AppPreferences.shared.showHidden
+        Task {
+            let result = await Task.detached(priority: .userInitiated) { () -> Result<[FileEntry], Error> in
+                Result { try FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil, options: hidden ? [] : [.skipsHiddenFiles]).map { try FileEntry(url: $0) } }
+            }.value
+            guard columnToken == token else { return }
+            switch result { case .success(let files): columnFolders.append(folder); columnEntries.append(files); case .failure(let failure): error = failure.localizedDescription }
+        }
     }
-    deinit { watcher?.cancel(); searchTimer?.invalidate() }
+    deinit { watcher?.cancel(); searchTimer?.invalidate(); reloadTimer?.invalidate() }
 }
 
 @MainActor func contentScopeApproved(_ roots: [URL]) -> Bool {

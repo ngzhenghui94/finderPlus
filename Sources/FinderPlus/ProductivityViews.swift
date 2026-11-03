@@ -269,7 +269,7 @@ struct InfoView: View {
         do {
             entry = try FileEntry(url: url)
             let values = try url.resourceValues(forKeys: [.tagNamesKey, .creationDateKey, .contentModificationDateKey, .hasHiddenExtensionKey, .isSymbolicLinkKey])
-            guard values.isSymbolicLink != true else { entry = nil; throw FolderComparison.Failure("Editing symlink metadata is not supported; inspect its target explicitly.") }
+            guard values.isSymbolicLink != true else { entry = nil; throw OperationFailure.message("Editing symlink metadata is not supported; inspect its target explicitly.") }
             tags = (values.tagNames ?? []).joined(separator: "\n")
             created = values.creationDate ?? Date()
             modified = values.contentModificationDate ?? Date()
@@ -302,7 +302,7 @@ struct InfoView: View {
         do {
             let oldAttributes = try FileManager.default.attributesOfItem(atPath: url.path)
             let wasLocked = oldAttributes[.immutable] as? Bool ?? false
-            if wasLocked && locked { throw FolderComparison.Failure("Unlock this item and save first before editing other metadata.") }
+            if wasLocked && locked { throw OperationFailure.message("Unlock this item and save first before editing other metadata.") }
             if wasLocked { try FileManager.default.setAttributes([.immutable: false], ofItemAtPath: url.path) }
             try FileManager.default.setAttributes([.creationDate: created, .modificationDate: modified], ofItemAtPath: url.path)
             var values = URLResourceValues()

@@ -34,6 +34,15 @@ enum CloudLocations {
         } catch { return "Status unavailable: \(error.localizedDescription)" }
     }
 
+    /// Darwin's SF_DATALESS marks File Provider / iCloud placeholders; reading one would download it.
+    static func isPlaceholder(_ info: stat) -> Bool { info.st_flags & UInt32(SF_DATALESS) != 0 }
+
+    /// An item on disk that is neither a symlink nor a cloud placeholder, so reading it stays local.
+    static func isReadableLocally(_ url: URL) -> Bool {
+        var info = stat()
+        return lstat(url.path, &info) == 0 && !isPlaceholder(info) && info.st_mode & S_IFMT != S_IFLNK
+    }
+
     static func isProviderURL(_ url: URL) -> Bool {
         let path = url.standardizedFileURL.path
         let root = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/CloudStorage").path
@@ -70,12 +79,12 @@ enum CloudLocations {
                         if values.isUbiquitousItem == true {
                             if evict {
                                 guard values.ubiquitousItemIsUploaded == true, values.ubiquitousItemIsUploading != true, values.ubiquitousItemHasUnresolvedConflicts != true else {
-                                    throw CloudError.message("Not fully uploaded or has unresolved conflicts; local copy preserved.")
+                                    throw OperationFailure.message("Not fully uploaded or has unresolved conflicts; local copy preserved.")
                                 }
                                 try FileManager.default.evictUbiquitousItem(at: url)
                             } else { try FileManager.default.startDownloadingUbiquitousItem(at: url) }
                         } else if isProviderURL(url), !evict {
-                            guard values.isDirectory != true else { throw CloudError.message("For provider folders, select individual files to download or use Finder's provider actions.") }
+                            guard values.isDirectory != true else { throw OperationFailure.message("For provider folders, select individual files to download or use Finder's provider actions.") }
                             var coordinationError: NSError?
                             var readError: Error?
                             NSFileCoordinator().coordinate(readingItemAt: url, options: [], error: &coordinationError) { coordinatedURL in
@@ -87,7 +96,7 @@ enum CloudLocations {
                             }
                             if let error = coordinationError ?? readError as NSError? { throw error }
                         } else {
-                            throw CloudError.message(evict ? "Eviction is supported only for iCloud items. Use this provider's Finder action for other clouds." : "This item is not recognized as an iCloud or File Provider item.")
+                            throw OperationFailure.message(evict ? "Eviction is supported only for iCloud items. Use this provider's Finder action for other clouds." : "This item is not recognized as an iCloud or File Provider item.")
                         }
                     } catch { errors.append("\(url.path): \(error.localizedDescription)") }
                 }
@@ -103,11 +112,6 @@ enum CloudLocations {
             NotificationCenter.default.post(name: .cloudLocationsChanged, object: nil)
         }
     }
-}
-
-private enum CloudError: LocalizedError {
-    case message(String)
-    var errorDescription: String? { if case .message(let text) = self { return text }; return nil }
 }
 
 extension Notification.Name {

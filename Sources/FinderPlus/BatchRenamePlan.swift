@@ -18,15 +18,11 @@ struct BatchRenamePlan {
         var id: String { url.path }
         var changed: Bool { url.lastPathComponent != name }
     }
-    struct Failure: LocalizedError {
-        let message: String
-        var errorDescription: String? { message }
-    }
 
     static func make(urls: [URL], options: Options) throws -> [Change] {
-        guard !urls.isEmpty else { throw Failure(message: "Select at least one item.") }
-        guard options.start >= 0, (1...12).contains(options.digits), options.start <= Int.max - urls.count else { throw Failure(message: "Use a nonnegative starting number and 1–12 padding digits.") }
-        if options.mode == .replace && options.find.isEmpty { throw Failure(message: "Enter the text to replace.") }
+        guard !urls.isEmpty else { throw OperationFailure.message("Select at least one item.") }
+        guard options.start >= 0, (1...12).contains(options.digits), options.start <= Int.max - urls.count else { throw OperationFailure.message("Use a nonnegative starting number and 1–12 padding digits.") }
+        if options.mode == .replace && options.find.isEmpty { throw OperationFailure.message("Enter the text to replace.") }
         let changes = try urls.enumerated().map { index, url -> Change in
             let isDirectory = try url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory == true
             let ext = options.preserveExtension && !isDirectory ? url.pathExtension : ""
@@ -50,23 +46,23 @@ struct BatchRenamePlan {
         var sources = Set<String>()
         for change in changes {
             let url = change.url.standardizedFileURL
-            guard url.isFileURL, sources.insert(url.path).inserted else { throw Failure(message: "Duplicate or invalid source: \(url.path)") }
-            guard !change.name.isEmpty, change.name != ".", change.name != "..", !change.name.contains("/"), !change.name.contains(":"), !change.name.contains("\0"), change.name.utf8.count <= 255 else { throw Failure(message: "Invalid filename: \(change.name)") }
+            guard url.isFileURL, sources.insert(url.path).inserted else { throw OperationFailure.message("Duplicate or invalid source: \(url.path)") }
+            try OperationsEngine.validName(change.name)
             if change.changed && url.lastPathComponent.precomposedStringWithCanonicalMapping.lowercased() == change.name.precomposedStringWithCanonicalMapping.lowercased() {
-                throw Failure(message: "Case-only and Unicode-normalization-only renames are not supported: \(change.name)")
+                throw OperationFailure.message("Case-only and Unicode-normalization-only renames are not supported: \(change.name)")
             }
             let target = url.deletingLastPathComponent().appendingPathComponent(change.name)
             // Conservative on case-sensitive disks too: never risk case-folding collisions on other volumes.
             let key = target.path.precomposedStringWithCanonicalMapping.lowercased()
-            guard destinations.insert(key).inserted else { throw Failure(message: "Several items would become \(change.name).") }
+            guard destinations.insert(key).inserted else { throw OperationFailure.message("Several items would become \(change.name).") }
             if change.changed && FileManager.default.fileExists(atPath: target.path) {
-                throw Failure(message: "The destination already exists: \(target.path). Rename cycles and case-only renames are not supported.")
+                throw OperationFailure.message("The destination already exists: \(target.path). Rename cycles and case-only renames are not supported.")
             }
-            guard FileManager.default.fileExists(atPath: url.path) else { throw Failure(message: "Source is missing: \(url.path)") }
+            guard FileManager.default.fileExists(atPath: url.path) else { throw OperationFailure.message("Source is missing: \(url.path)") }
         }
         let paths = changes.map { $0.url.standardizedFileURL.path }
         for path in paths {
-            if paths.contains(where: { path.hasPrefix($0 + "/") }) { throw Failure(message: "Do not rename a folder and one of its descendants in the same batch.") }
+            if paths.contains(where: { path.hasPrefix($0 + "/") }) { throw OperationFailure.message("Do not rename a folder and one of its descendants in the same batch.") }
         }
     }
 
@@ -82,11 +78,11 @@ struct BatchRenamePlan {
         options.mode = .number
         options.prefix = "Photo-"
         let plan = try make(urls: [a, b], options: options)
-        guard plan.map(\.name) == ["Photo-001.txt", "Photo-002.txt"] else { throw Failure(message: "Numbered rename self-check failed") }
+        guard plan.map(\.name) == ["Photo-001.txt", "Photo-002.txt"] else { throw OperationFailure.message("Numbered rename self-check failed") }
         var rejected = 0
         for changes in [[Change(url: a, name: "b.txt")], [Change(url: a, name: "../bad")], [Change(url: a, name: "same"), Change(url: b, name: "SAME")]] {
             do { try validate(changes) } catch { rejected += 1 }
         }
-        guard rejected == 3 else { throw Failure(message: "Rename collision self-check failed") }
+        guard rejected == 3 else { throw OperationFailure.message("Rename collision self-check failed") }
     }
 }

@@ -9,14 +9,21 @@ enum NearbyShare {
     static let serviceType = "_finderplus-drop._tcp"
     struct Offer: Codable { var sender: String; var files: [Item] }
     struct Item: Codable { var name: String; var size: Int64 }
-    struct Failure: LocalizedError { let errorDescription: String?; init(_ text: String) { errorDescription = text } }
     static let chunk = 1 << 20
 
     /// Trust boundary: names come from the network and must stay a single path component.
     static func safeName(_ raw: String) -> String? {
         let name = raw.replacingOccurrences(of: ":", with: "-")
-        guard !name.isEmpty, name.utf8.count <= 255, name != ".", name != "..", !name.contains("/"), !name.contains("\0") else { return nil }
-        return name
+        return (try? OperationsEngine.validName(name)) == nil ? nil : name
+    }
+
+    /// Trust boundary: the offer's safe names, or nil when it must be refused.
+    static func validNames(_ offer: Offer) -> [String]? {
+        let names = offer.files.compactMap { safeName($0.name) }
+        // 1 PiB per file keeps the total of 10,000 sizes far from Int64 overflow.
+        guard !offer.files.isEmpty, offer.files.count <= 10_000, names.count == offer.files.count,
+              offer.files.allSatisfy({ (0...(1 << 50)).contains($0.size) }) else { return nil }
+        return names
     }
 
     static func parameters() -> NWParameters {
@@ -31,33 +38,32 @@ enum NearbyShare {
         defer { connection.cancel() }
         let header = try JSONEncoder().encode(Offer(sender: sender, files: items))
         try await connection.write(withUnsafeBytes(of: UInt32(header.count).bigEndian) { Data($0) } + header)
-        guard try await connection.read(1).first == 1 else { throw Failure("The other Mac declined the files.") }
+        guard try await connection.read(1).first == 1 else { throw OperationFailure.message("The other Mac declined the files.") }
         for (url, item) in zip(files, items) {
             let handle = try FileHandle(forReadingFrom: url)
             defer { try? handle.close() }
             var remaining = item.size
             while remaining > 0 {
-                guard let data = try handle.read(upToCount: Int(min(remaining, Int64(chunk)))), !data.isEmpty else { throw Failure("\(item.name) changed while sending.") }
+                guard let data = try handle.read(upToCount: Int(min(remaining, Int64(chunk)))), !data.isEmpty else { throw OperationFailure.message("\(item.name) changed while sending.") }
                 try await connection.write(data); remaining -= Int64(data.count)
             }
         }
-        guard try await connection.read(1).first == 1 else { throw Failure("The other Mac could not save the files.") }
+        guard try await connection.read(1).first == 1 else { throw OperationFailure.message("The other Mac could not save the files.") }
     }
 
     /// Returns the saved files, or [] when declined.
     static func receive(_ connection: NWConnection, into folder: URL, accept: @escaping (Offer) async -> Bool) async throws -> (Offer, [URL]) {
         defer { connection.cancel() }
         let length = try await connection.read(4).reduce(0) { $0 << 8 | Int($1) }
-        guard length > 0, length <= chunk else { throw Failure("Invalid share request.") }
+        guard length > 0, length <= chunk else { throw OperationFailure.message("Invalid share request.") }
         let offer = try JSONDecoder().decode(Offer.self, from: await connection.read(length))
-        let names = offer.files.compactMap { safeName($0.name) }
-        guard !offer.files.isEmpty, offer.files.count <= 10_000, names.count == offer.files.count, offer.files.allSatisfy({ $0.size >= 0 }) else { throw Failure("Invalid share request.") }
+        guard let names = validNames(offer) else { throw OperationFailure.message("Invalid share request.") }
         guard await accept(offer) else { try? await connection.write(Data([0])); return (offer, []) }
         try await connection.write(Data([1]))
         var saved: [URL] = []
         for (name, item) in zip(names, offer.files) {
             let part = folder.appendingPathComponent(".\(UUID().uuidString).finderplus-part")
-            guard FileManager.default.createFile(atPath: part.path, contents: nil) else { throw Failure("Cannot write to \(folder.path).") }
+            guard FileManager.default.createFile(atPath: part.path, contents: nil) else { throw OperationFailure.message("Cannot write to \(folder.path).") }
             do {
                 let handle = try FileHandle(forWritingTo: part)
                 defer { try? handle.close() }
@@ -84,11 +90,13 @@ enum NearbyShare {
             do { try FileManager.default.moveItem(at: source, to: candidate); return candidate }
             catch CocoaError.fileWriteFileExists { continue }
         }
-        throw Failure("Too many files named \(name).")
+        throw OperationFailure.message("Too many files named \(name).")
     }
 
     static func selfCheck() async throws {
-        guard safeName("a.pdf") == "a.pdf", safeName("x:y") == "x-y", ["", ".", "..", "../etc", "a/b", "/abs"].allSatisfy({ safeName($0) == nil }) else { throw Failure("Nearby share name check failed.") }
+        guard safeName("a.pdf") == "a.pdf", safeName("x:y") == "x-y", ["", ".", "..", "../etc", "a/b", "/abs"].allSatisfy({ safeName($0) == nil }),
+              validNames(Offer(sender: "x", files: [Item(name: "a", size: .max), Item(name: "b", size: .max)])) == nil,
+              validNames(Offer(sender: "x", files: [Item(name: "a", size: 1)])) == ["a"] else { throw OperationFailure.message("Nearby share name check failed.") }
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("FinderPlus-share-\(UUID().uuidString)")
         let source = root.appendingPathComponent("out"), inbox = root.appendingPathComponent("in")
         defer { try? FileManager.default.removeItem(at: root) }
@@ -115,7 +123,7 @@ enum NearbyShare {
         var results = received.makeAsyncIterator()
         guard let urls = try await results.next(), urls.map(\.lastPathComponent) == ["big 2.bin", "empty.txt"], try Data(contentsOf: urls[0]) == big, try Data(contentsOf: urls[1]).isEmpty,
               try Data(contentsOf: inbox.appendingPathComponent("big.bin")) == Data("old".utf8),
-              try urls[0].resourceValues(forKeys: [.quarantinePropertiesKey]).quarantineProperties != nil else { throw Failure("Nearby share loopback check failed.") }
+              try urls[0].resourceValues(forKeys: [.quarantinePropertiesKey]).quarantineProperties != nil else { throw OperationFailure.message("Nearby share loopback check failed.") }
         print("Nearby share: name validation, loopback transfer, no overwrite, quarantine PASS")
     }
 }
@@ -129,7 +137,7 @@ extension NWConnection {
     func read(_ count: Int) async throws -> Data {
         try await withCheckedThrowingContinuation { done in
             receive(minimumIncompleteLength: count, maximumLength: count) { data, _, _, error in
-                if let error { done.resume(throwing: error) } else if let data, data.count == count { done.resume(returning: data) } else { done.resume(throwing: NearbyShare.Failure("The connection closed early.")) }
+                if let error { done.resume(throwing: error) } else if let data, data.count == count { done.resume(returning: data) } else { done.resume(throwing: OperationFailure.message("The connection closed early.")) }
             }
         }
     }

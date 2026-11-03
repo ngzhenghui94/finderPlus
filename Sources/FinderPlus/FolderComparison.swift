@@ -27,9 +27,9 @@ struct FolderComparison {
             size = values.fileSize ?? 0
             modified = values.contentModificationDate ?? .distantPast
             if !isDirectory && !isSymlink {
-                guard values.isRegularFile == true else { throw Failure("Unsupported special file: \(url.path)") }
+                guard values.isRegularFile == true else { throw OperationFailure.message("Unsupported special file: \(url.path)") }
                 if !allowCloudDownloads && (CloudLocations.isProviderURL(url) || (values.isUbiquitousItem == true && values.ubiquitousItemDownloadingStatus != .current && values.ubiquitousItemDownloadingStatus != .downloaded)) {
-                    throw Failure("Comparison would read a cloud file: \(url.path). Enable cloud downloads explicitly, or download the files first.")
+                    throw OperationFailure.message("Comparison would read a cloud file: \(url.path). Enable cloud downloads explicitly, or download the files first.")
                 }
                 let handle = try FileHandle(forReadingFrom: url)
                 defer { try? handle.close() }
@@ -40,16 +40,11 @@ struct FolderComparison {
                 }
                 digest = Data(hash.finalize())
                 let after = try url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
-                guard after.fileSize == values.fileSize, after.contentModificationDate == values.contentModificationDate else { throw Failure("File changed during comparison: \(url.path)") }
+                guard after.fileSize == values.fileSize, after.contentModificationDate == values.contentModificationDate else { throw OperationFailure.message("File changed during comparison: \(url.path)") }
             } else if isSymlink {
                 digest = Data(try FileManager.default.destinationOfSymbolicLink(atPath: url.path).utf8)
             } else { digest = nil }
         }
-    }
-    struct Failure: LocalizedError {
-        let message: String
-        init(_ message: String) { self.message = message }
-        var errorDescription: String? { message }
     }
     let left: URL
     let right: URL
@@ -59,7 +54,7 @@ struct FolderComparison {
     static func compare(left: URL, right: URL, allowCloudDownloads: Bool = false) throws -> FolderComparison {
         let left = left.standardizedFileURL.resolvingSymlinksInPath()
         let right = right.standardizedFileURL.resolvingSymlinksInPath()
-        guard left != right, !left.path.hasPrefix(right.path + "/"), !right.path.hasPrefix(left.path + "/") else { throw Failure("Choose separate, non-nested folders.") }
+        guard left != right, !left.path.hasPrefix(right.path + "/"), !right.path.hasPrefix(left.path + "/") else { throw OperationFailure.message("Choose separate, non-nested folders.") }
         let a = try inventory(left, allowCloudDownloads: allowCloudDownloads)
         let b = try inventory(right, allowCloudDownloads: allowCloudDownloads)
         let items = Set(a.keys).union(b.keys).sorted().map { path -> Item in
@@ -76,15 +71,15 @@ struct FolderComparison {
     }
 
     private static func inventory(_ root: URL, allowCloudDownloads: Bool) throws -> [String: Snapshot] {
-        guard try root.resourceValues(forKeys: [.isDirectoryKey]).isDirectory == true else { throw Failure("Not a directory: \(root.path)") }
+        guard try root.resourceValues(forKeys: [.isDirectoryKey]).isDirectory == true else { throw OperationFailure.message("Not a directory: \(root.path)") }
         var enumerationError: Error?
-        guard let enumerator = FileManager.default.enumerator(at: root, includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey], options: [], errorHandler: { _, error in enumerationError = error; return false }) else { throw Failure("Cannot read \(root.path)") }
+        guard let enumerator = FileManager.default.enumerator(at: root, includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey], options: [], errorHandler: { _, error in enumerationError = error; return false }) else { throw OperationFailure.message("Cannot read \(root.path)") }
         var items: [String: Snapshot] = [:]
         for case let enumeratedURL as URL in enumerator {
             try Task.checkCancellation()
             // Normalize the parent, not the item: symlinks must remain symlinks.
             let url = enumeratedURL.deletingLastPathComponent().standardizedFileURL.resolvingSymlinksInPath().appendingPathComponent(enumeratedURL.lastPathComponent)
-            guard url.path.hasPrefix(root.path + "/") else { throw Failure("An enumerated item escaped the comparison folder.") }
+            guard url.path.hasPrefix(root.path + "/") else { throw OperationFailure.message("An enumerated item escaped the comparison folder.") }
             let snapshot = try Snapshot(url, allowCloudDownloads: allowCloudDownloads)
             if snapshot.isSymlink { enumerator.skipDescendants() }
             items[String(url.path.dropFirst(root.path.count + 1))] = snapshot
@@ -105,7 +100,7 @@ struct FolderComparison {
     func copies(selected: Set<String>, direction: Direction) throws -> [Copy] {
         var result: [Copy] = []
         for item in items where selected.contains(item.id) && item.kind != .equal {
-            guard item.canCopy else { throw Failure("Symlinks and type conflicts require manual resolution: \(item.path)") }
+            guard item.canCopy else { throw OperationFailure.message("Symlinks and type conflicts require manual resolution: \(item.path)") }
             let useLeft: Bool
             switch direction {
             case .leftToRight: useLeft = true
@@ -114,7 +109,7 @@ struct FolderComparison {
                 if item.left == nil { useLeft = false }
                 else if item.right == nil { useLeft = true }
                 else {
-                    guard item.left!.modified != item.right!.modified else { throw Failure("Different contents with equal modification dates; choose an explicit direction: \(item.path)") }
+                    guard item.left!.modified != item.right!.modified else { throw OperationFailure.message("Different contents with equal modification dates; choose an explicit direction: \(item.path)") }
                     useLeft = item.left!.modified > item.right!.modified
                 }
             }
@@ -131,11 +126,11 @@ struct FolderComparison {
     func validate(_ copies: [Copy]) throws {
         for copy in copies {
             let current = try Snapshot(copy.source, allowCloudDownloads: allowCloudDownloads)
-            guard current == copy.sourceSnapshot else { throw Failure("Source changed since review: \(copy.source.path). Compare again.") }
+            guard current == copy.sourceSnapshot else { throw OperationFailure.message("Source changed since review: \(copy.source.path). Compare again.") }
             if let expected = copy.destinationSnapshot {
-                guard try Snapshot(copy.destination, allowCloudDownloads: allowCloudDownloads) == expected else { throw Failure("Destination changed since review: \(copy.destination.path). Compare again.") }
+                guard try Snapshot(copy.destination, allowCloudDownloads: allowCloudDownloads) == expected else { throw OperationFailure.message("Destination changed since review: \(copy.destination.path). Compare again.") }
             } else {
-                guard !FileManager.default.fileExists(atPath: copy.destination.path) else { throw Failure("Destination appeared since review: \(copy.destination.path). Compare again.") }
+                guard !FileManager.default.fileExists(atPath: copy.destination.path) else { throw OperationFailure.message("Destination appeared since review: \(copy.destination.path). Compare again.") }
             }
         }
     }
@@ -155,12 +150,12 @@ struct FolderComparison {
         let comparison = try compare(left: left, right: right)
         guard comparison.items.first(where: { $0.path == "changed" })?.kind == .different,
               comparison.items.first(where: { $0.path == "same" })?.kind == .equal,
-              comparison.items.first(where: { $0.path == "nested/new" })?.kind == .onlyLeft else { throw Failure("Recursive comparison self-check failed") }
+              comparison.items.first(where: { $0.path == "nested/new" })?.kind == .onlyLeft else { throw OperationFailure.message("Recursive comparison self-check failed") }
         let copies = try comparison.copies(selected: Set(comparison.items.map(\.id)), direction: .leftToRight)
-        guard copies.count == 2 else { throw Failure("Directory deduplication self-check failed") }
+        guard copies.count == 2 else { throw OperationFailure.message("Directory deduplication self-check failed") }
         try comparison.validate(copies)
         try Data("edited".utf8).write(to: right.appendingPathComponent("changed"))
         do { try comparison.validate(copies) } catch { return }
-        throw Failure("Stale comparison self-check failed")
+        throw OperationFailure.message("Stale comparison self-check failed")
     }
 }

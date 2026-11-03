@@ -33,7 +33,7 @@ actor OperationControl {
     }
 }
 
-struct OperationMove: Codable {
+struct OperationMove: Codable, Equatable {
     var from: String
     var to: String
     var signature: String
@@ -42,7 +42,7 @@ struct OperationMove: Codable {
     var fromParent: String
     var toParent: String
 }
-struct OperationRecord: Codable {
+struct OperationRecord: Codable, Equatable {
     var id: UUID
     var title: String
     var state: String = "working"
@@ -52,7 +52,7 @@ struct OperationRecord: Codable {
     var artifacts: [String] = []
     var error: String? = nil
 }
-struct OperationStorage: Codable {
+struct OperationStorage: Codable, Equatable {
     var path: String
     let device: UInt64
     let inode: UInt64
@@ -63,11 +63,82 @@ struct OperationStorage: Codable {
     var trashedAt: String?
 }
 
-struct OperationJournal: Codable {
+struct OperationJournal: Codable, Equatable {
     var version = 1
     var records: [OperationRecord] = []
     var storage: [OperationStorage]?
     var clearingHistory: Bool?
+}
+
+/// One appended journal change: small fields whole, the growing lists only at indices that changed,
+/// so a write costs the size of the change instead of the size of the whole history.
+struct JournalPatch: Codable {
+    struct Record: Codable {
+        var index: Int
+        var head: OperationRecord
+        var moveCount: Int
+        var moves: [Int: OperationMove]
+        var artifactCount: Int
+        var artifacts: [Int: String]
+    }
+    var recordCount: Int
+    var records: [Record]
+    var storageCount: Int?
+    var storage: [Int: OperationStorage]
+    var clearingHistory: Bool?
+
+    init(from old: OperationJournal, to new: OperationJournal) {
+        records = new.records.indices.compactMap { index in
+            let before = old.records.indices.contains(index) ? old.records[index] : nil
+            let record = new.records[index]
+            guard before != record else { return nil }
+            var head = record
+            head.moves = []; head.artifacts = []
+            return Record(index: index, head: head, moveCount: record.moves.count, moves: Self.changes(before?.moves ?? [], record.moves),
+                          artifactCount: record.artifacts.count, artifacts: Self.changes(before?.artifacts ?? [], record.artifacts))
+        }
+        recordCount = new.records.count
+        storageCount = new.storage?.count
+        storage = Self.changes(old.storage ?? [], new.storage ?? [])
+        clearingHistory = new.clearingHistory
+    }
+
+    func apply(to journal: inout OperationJournal) throws {
+        journal.records.removeLast(max(0, journal.records.count - recordCount))
+        for change in records {
+            var record = change.head
+            if journal.records.indices.contains(change.index) {
+                record.moves = journal.records[change.index].moves
+                record.artifacts = journal.records[change.index].artifacts
+            }
+            try Self.merge(&record.moves, count: change.moveCount, change.moves)
+            try Self.merge(&record.artifacts, count: change.artifactCount, change.artifacts)
+            try Self.merge(&journal.records, count: max(journal.records.count, change.index + 1), [change.index: record])
+        }
+        guard journal.records.count == recordCount else { throw OperationFailure.message("Operations journal log is inconsistent.") }
+        if let storageCount {
+            var list = journal.storage ?? []
+            try Self.merge(&list, count: storageCount, storage)
+            journal.storage = list
+        } else { journal.storage = nil }
+        journal.clearingHistory = clearingHistory
+    }
+
+    private static func changes<T: Equatable>(_ old: [T], _ new: [T]) -> [Int: T] {
+        var result: [Int: T] = [:]
+        for index in new.indices where !old.indices.contains(index) || old[index] != new[index] { result[index] = new[index] }
+        return result
+    }
+
+    private static func merge<T>(_ list: inout [T], count: Int, _ changes: [Int: T]) throws {
+        list.removeLast(max(0, list.count - count))
+        for (index, value) in changes.sorted(by: { $0.key < $1.key }) {
+            if index < list.count { list[index] = value }
+            else if index == list.count { list.append(value) }
+            else { throw OperationFailure.message("Operations journal log is out of order.") }
+        }
+        guard list.count == count else { throw OperationFailure.message("Operations journal log is inconsistent.") }
+    }
 }
 
 struct OperationHistoryScope: Sendable {
@@ -146,6 +217,10 @@ actor OperationsEngine {
     private let fm = FileManager.default
     private let journalURL: URL
     private var journal = OperationJournal()
+    /// What the snapshot plus the log on disk hold; persist() appends the difference to `journal`.
+    private var persisted = OperationJournal()
+    private var snapshotDigest = ""
+    private var logStarted = false
     private var ownedArtifactNames: Set<String> = []
     private var loadError: String?
 
@@ -153,14 +228,37 @@ actor OperationsEngine {
         journalURL = directory.appendingPathComponent("operations.json")
         do {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-            journal = try Self.readJournal(journalURL)
+            (journal, snapshotDigest, logStarted) = try Self.readJournal(journalURL)
+            persisted = journal
             ownedArtifactNames = Set(journal.records.flatMap(\.artifacts).map { URL(fileURLWithPath: $0).lastPathComponent })
         } catch { loadError = "Operations journal unavailable: \(error.localizedDescription)" }
     }
 
-    private static func readJournal(_ url: URL) throws -> OperationJournal {
-        guard try OperationSnapshot.capture(url) != nil else { return OperationJournal() }
-        let loaded = try JSONDecoder().decode(OperationJournal.self, from: Data(contentsOf: url))
+    private var logURL: URL { Self.logURL(journalURL) }
+    private static func logURL(_ journal: URL) -> URL { journal.deletingLastPathComponent().appendingPathComponent("operations.log") }
+    static func digest(_ data: Data) -> String { SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined() }
+
+    private func load() throws {
+        (journal, snapshotDigest, logStarted) = try Self.readJournal(journalURL)
+        persisted = journal
+        ownedArtifactNames = Set(journal.records.flatMap(\.artifacts).map { URL(fileURLWithPath: $0).lastPathComponent })
+    }
+
+    /// The snapshot with its log replayed, the snapshot's digest, and whether the log belongs to that snapshot.
+    private static func readJournal(_ url: URL) throws -> (OperationJournal, String, Bool) {
+        let snapshot = try OperationSnapshot.capture(url) == nil ? Data() : Data(contentsOf: url)
+        let digest = digest(snapshot)
+        var loaded = snapshot.isEmpty ? OperationJournal() : try JSONDecoder().decode(OperationJournal.self, from: snapshot)
+        var logMatches = false
+        if try OperationSnapshot.capture(logURL(url)) != nil {
+            // A final line without its newline was cut short by a crash; the change it guarded never ran.
+            let lines = try Data(contentsOf: logURL(url)).split(separator: 0x0A, omittingEmptySubsequences: false).dropLast().map { Data($0) }
+            // A log begun against an older snapshot was already folded into this one by compaction.
+            if let header = lines.first, (try? JSONDecoder().decode(String.self, from: header)) == digest {
+                logMatches = true
+                for line in lines.dropFirst() { try JSONDecoder().decode(JournalPatch.self, from: line).apply(to: &loaded) }
+            }
+        }
         guard loaded.version == 1 else { throw OperationFailure.message("Unsupported operations journal version. The existing journal was not changed.") }
         let states: Set<String> = ["working", "committed", "undone", "cancelled", "superseded", "undoing", "redoing", "interrupted"]
         guard Set(loaded.records.map(\.id)).count == loaded.records.count else { throw OperationFailure.message("Duplicate journal records.") }
@@ -185,7 +283,7 @@ actor OperationsEngine {
                 throw OperationFailure.message("Invalid retained storage identity.")
             }
         }
-        return loaded
+        return (loaded, digest, logMatches)
     }
 
     func status() -> (Bool, Bool, [OperationsRecovery], String?) {
@@ -197,14 +295,45 @@ actor OperationsEngine {
                 loadError ?? (clearing ? "History cleanup was interrupted. Retry Clear File Operation History; completed Trash moves are retained in the journal." : nil))
     }
 
+    /// Appends the change since the last write to the log; the first line names the snapshot the log extends.
     private func persist() throws {
         if let loadError { throw OperationFailure.message(loadError) }
+        var data = logStarted ? Data() : try JSONEncoder().encode(snapshotDigest) + [0x0A]
+        data += try JSONEncoder().encode(JournalPatch(from: persisted, to: journal)) + [0x0A]
+        let fd = open(logURL.path, O_WRONLY | O_CREAT | O_APPEND | O_NOFOLLOW | (logStarted ? 0 : O_TRUNC), 0o600)
+        guard fd >= 0 else { throw OperationFailure.message("Cannot open the operations journal log: \(String(cString: strerror(errno)))") }
+        let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+        let start = lseek(fd, 0, SEEK_END)
+        do {
+            try handle.write(contentsOf: data)
+            try handle.synchronize()
+        } catch {
+            _ = ftruncate(fd, start) // never leave a half line for the next append to extend
+            throw error
+        }
+        if !logStarted { syncDirectory() }
+        logStarted = true
+        persisted = journal
+    }
+
+    /// Folds the log into a fresh snapshot: one full write per operation instead of one per step.
+    private func compact() throws {
+        guard logStarted else { return }
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        try encoder.encode(journal).write(to: journalURL, options: .atomic)
+        let data = try encoder.encode(persisted)
+        try data.write(to: journalURL, options: .atomic)
         let handle = try FileHandle(forWritingTo: journalURL)
         try handle.synchronize()
         try handle.close()
+        syncDirectory()
+        // From here the log's header no longer matches, so a crash before truncation cannot replay it twice.
+        snapshotDigest = Self.digest(data)
+        logStarted = false
+        _ = truncate(logURL.path, 0)
+    }
+
+    private func syncDirectory() {
         let fd = open(journalURL.deletingLastPathComponent().path, O_RDONLY)
         if fd >= 0 { _ = fsync(fd); close(fd) }
     }
@@ -228,7 +357,7 @@ actor OperationsEngine {
     private func local(_ url: URL) throws {
         guard url.isFileURL else { throw OperationFailure.message("Only local file URLs are supported.") }
         var info = stat()
-        if lstat(url.path, &info) == 0, info.st_flags & 0x40000000 != 0 {
+        if lstat(url.path, &info) == 0, CloudLocations.isPlaceholder(info) {
             throw OperationFailure.message("Cloud-only item must be downloaded before use: \(url.path)")
         }
         let values = try url.resourceValues(forKeys: [.isUbiquitousItemKey, .ubiquitousItemDownloadingStatusKey])
@@ -327,6 +456,10 @@ actor OperationsEngine {
             }
         } else if type == .typeSymbolicLink {
             try fm.createSymbolicLink(atPath: destination.path, withDestinationPath: fm.destinationOfSymbolicLink(atPath: source.path))
+        } else if type == .typeRegular, clonefile(source.path, destination.path, UInt32(CLONE_NOFOLLOW)) == 0 {
+            // Same APFS volume: a clone is instant and shares blocks until either copy changes.
+            await control.addCopied(Int(try fm.attributesOfItem(atPath: source.path)[.size] as? UInt64 ?? 0))
+            await progress(0.9, "Copying " + source.lastPathComponent)
         } else if type == .typeRegular {
             guard fm.createFile(atPath: destination.path, contents: nil) else { throw OperationFailure.message("Cannot create staging file: \(destination.path)") }
             let input = try FileHandle(forReadingFrom: source)
@@ -352,7 +485,8 @@ actor OperationsEngine {
         guard copyfile(source.path, destination.path, nil, flags) == 0 else { throw OperationFailure.message("Cannot preserve metadata for \(source.path): \(String(cString: strerror(errno)))") }
     }
 
-    private func apply(_ record: Int, _ index: Int, forward: Bool, control: OperationControl) async throws {
+    /// `fingerprinted`: the caller hashed the source a moment ago, so skip hashing it again.
+    private func apply(_ record: Int, _ index: Int, forward: Bool, control: OperationControl, fingerprinted: Bool = false) async throws {
         try await control.checkpoint()
         var step = journal.records[record].moves[index]
         guard step.applied != forward else { return }
@@ -366,7 +500,9 @@ actor OperationsEngine {
             throw OperationFailure.message("A parent directory moved or changed. Restore its original location before retrying: \(source.path)")
         }
         guard exists(source), !exists(destination) else { throw OperationFailure.message("Refusing to overwrite or recover changed paths: \(source.path) → \(destination.path)") }
-        guard try await signature(source, control: control) == step.signature else { throw OperationFailure.message("File changed since this operation; refusing to overwrite it: \(source.path)") }
+        if !fingerprinted {
+            guard try await signature(source, control: control) == step.signature else { throw OperationFailure.message("File changed since this operation; refusing to overwrite it: \(source.path)") }
+        }
         for entry in journal.storage ?? [] where entry.signature != nil && entry.trashedAt == nil {
             if source.path.hasPrefix(entry.path + "/") || destination.path.hasPrefix(entry.path + "/") {
                 try await validateStorage(entry, at: URL(fileURLWithPath: entry.path), checkParent: true, control: control)
@@ -391,17 +527,19 @@ actor OperationsEngine {
         try persist()
     }
 
-    private func move(_ source: URL, _ destination: URL, record: Int, control: OperationControl, trash: Bool = false) async throws {
+    /// `known`: a fingerprint of `source` the caller just verified, so the item is not read again.
+    private func move(_ source: URL, _ destination: URL, record: Int, control: OperationControl, trash: Bool = false, known: String? = nil) async throws {
         try local(source)
         if try kind(source) == .typeDirectory {
             let retained = journal.records.flatMap(\.artifacts).contains { $0.hasPrefix(source.path + "/") && exists(URL(fileURLWithPath: $0)) }
             guard !retained else { throw OperationFailure.message("This folder contains retained FinderPlus undo storage. Move its contents instead, or leave the folder in place while this undo history is needed: \(source.path)") }
         }
-        var step = OperationMove(from: source.path, to: destination.path, signature: try await signature(source, control: control), fromParent: try parentIdentity(source), toParent: try parentIdentity(destination))
+        let fingerprint = if let known { known } else { try await signature(source, control: control) }
+        var step = OperationMove(from: source.path, to: destination.path, signature: fingerprint, fromParent: try parentIdentity(source), toParent: try parentIdentity(destination))
         if trash { step.trashBookmark = try source.bookmarkData(options: .minimalBookmark, includingResourceValuesForKeys: nil, relativeTo: nil) }
         journal.records[record].moves.append(step)
         try persist()
-        try await apply(record, journal.records[record].moves.count - 1, forward: true, control: control)
+        try await apply(record, journal.records[record].moves.count - 1, forward: true, control: control, fingerprinted: true)
     }
 
     private func unique(_ destination: URL) -> URL {
@@ -461,6 +599,12 @@ actor OperationsEngine {
                 return
             }
         }
+        // Same disk: a journaled rename is instant and needs no space. Copying is for moves between disks.
+        if moving, approvedDestination == nil,
+           try OperationSnapshot.capture(source)?.device == OperationSnapshot.capture(destination.deletingLastPathComponent().resolvingSymlinksInPath())?.device {
+            try await move(source, destination, record: record, control: control)
+            return
+        }
         let before = try await signature(source, control: control)
         let staged = try stage(in: destination.deletingLastPathComponent(), record: record)
         try await copyTree(source, staged, control: control, progress: progress)
@@ -476,13 +620,13 @@ actor OperationsEngine {
                 throw OperationFailure.message("Destination changed after conflict review. No replacement was made; retry to review it again.")
             }
             let held = try stage(in: destination.deletingLastPathComponent(), record: record)
-            try await move(destination, held, record: record, control: control)
+            try await move(destination, held, record: record, control: control, known: approvedDestination)
         }
-        try await move(staged, destination, record: record, control: control)
+        try await move(staged, destination, record: record, control: control, known: before)
         if moving {
             guard try await signature(source, control: control) == before else { throw OperationFailure.message("Source changed after copying; original retained.") }
             let held = try stage(in: sourceStorage ?? source.deletingLastPathComponent(), record: record)
-            try await move(source, held, record: record, control: control)
+            try await move(source, held, record: record, control: control, known: before)
         }
     }
 
@@ -510,12 +654,12 @@ actor OperationsEngine {
     private static func historyRevision(_ value: OperationJournal) throws -> String {
         let encoder = JSONEncoder()
         encoder.outputFormatting = .sortedKeys
-        return SHA256.hash(data: try encoder.encode(value)).map { String(format: "%02x", $0) }.joined()
+        return digest(try encoder.encode(value))
     }
 
     func historyScope() throws -> OperationHistoryScope {
         if let loadError { throw OperationFailure.message(loadError) }
-        let current = try Self.readJournal(journalURL)
+        let current = try Self.readJournal(journalURL).0
         return OperationHistoryScope(revision: try Self.historyRevision(current),
                                      paths: Array(Set(current.records.flatMap(\.artifacts))).sorted(),
                                      recordCount: current.records.count)
@@ -638,6 +782,7 @@ actor OperationsEngine {
             markStorageTrashed(index, destination: result as URL)
             try persist()
         }
+        try compact() // the backup below must hold the full journal, not a snapshot behind its log
         let previous = journal
         let backup = journalURL.deletingLastPathComponent().appendingPathComponent("history-cleanup-" + UUID().uuidString + ".json")
         try Data(contentsOf: journalURL).write(to: backup, options: .withoutOverwriting)
@@ -734,8 +879,9 @@ actor OperationsEngine {
             throw OperationFailure.message("Another FinderPlus process is performing a file operation. Wait for it to finish.")
         }
         defer { _ = flock(lock, LOCK_UN); close(lock) }
-        journal = try Self.readJournal(journalURL)
-        ownedArtifactNames = Set(journal.records.flatMap(\.artifacts).map { URL(fileURLWithPath: $0).lastPathComponent })
+        try load()
+        // Runs before the unlock above. If it fails, the log stays valid and the next load replays it.
+        defer { try? compact() }
         if case .clearHistory(let scope) = request {
             await progress(0.05, "Verifying retained history storage")
             try await clearHistory(scope, control: control)

@@ -71,7 +71,7 @@ struct KeyboardShortcutsView: View {
         var used: [String: String] = [:]
         let validTitles = Set(commands.map(\.title))
         for (title, value) in input {
-            guard validTitles.contains(title) else { throw ShortcutFailure("Unknown command in shortcuts: \(title)") }
+            guard validTitles.contains(title) else { throw OperationFailure.message("Unknown command in shortcuts: \(title)") }
             let value = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
             if value.isEmpty { continue }
             let parts = value.components(separatedBy: "+")
@@ -80,7 +80,7 @@ struct KeyboardShortcutsView: View {
                   !modifiers.isEmpty, Set(modifiers).count == modifiers.count,
                   modifiers.allSatisfy({ ["cmd", "ctrl", "shift", "option", "alt"].contains($0) }),
                   modifiers.contains("cmd") || modifiers.contains("ctrl") || modifiers.contains("option") || modifiers.contains("alt") else {
-                throw ShortcutFailure("Invalid shortcut for \(title). Use cmd/ctrl/option with one character; shift is optional.")
+                throw OperationFailure.message("Invalid shortcut for \(title). Use cmd/ctrl/option with one character; shift is optional.")
             }
             let normalized = Set(modifiers.map { $0 == "alt" ? "option" : $0 })
             let canonical = ["cmd", "ctrl", "option", "shift"].filter { normalized.contains($0) }.joined(separator: "+") + "+" + key
@@ -92,10 +92,10 @@ struct KeyboardShortcutsView: View {
             let relevantFlags: NSEvent.ModifierFlags = [.command, .control, .option, .shift]
             for (other, original) in AppDelegate.shared.originalKeys where other != title {
                 if original.0.lowercased() == key && original.1.intersection(relevantFlags) == requestedFlags {
-                    throw ShortcutFailure("\(value) is reserved for \(other). Choose an unused shortcut.")
+                    throw OperationFailure.message("\(value) is reserved for \(other). Choose an unused shortcut.")
                 }
             }
-            if let other = used[canonical] { throw ShortcutFailure("\(title) and \(other) use the same shortcut.") }
+            if let other = used[canonical] { throw OperationFailure.message("\(title) and \(other) use the same shortcut.") }
             used[canonical] = title
             output[title] = canonical
         }
@@ -123,7 +123,7 @@ struct KeyboardShortcutsView: View {
         guard panel.runModal() == .OK, let url = panel.url else { return }
         do {
             let values = try url.resourceValues(forKeys: [.fileSizeKey])
-            guard (values.fileSize ?? Int.max) <= 1_048_576 else { throw ShortcutFailure("Shortcut files must be smaller than 1 MB.") }
+            guard (values.fileSize ?? Int.max) <= 1_048_576 else { throw OperationFailure.message("Shortcut files must be smaller than 1 MB.") }
             let imported = try JSONDecoder().decode([String: String].self, from: Data(contentsOf: url))
             draft = try validated(imported)
             error = nil
@@ -144,10 +144,4 @@ struct KeyboardShortcutsView: View {
             message = "Shortcuts exported."
         } catch { self.error = error.localizedDescription }
     }
-}
-
-private struct ShortcutFailure: LocalizedError {
-    let message: String
-    init(_ message: String) { self.message = message }
-    var errorDescription: String? { message }
 }

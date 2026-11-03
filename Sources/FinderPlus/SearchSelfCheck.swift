@@ -3,13 +3,8 @@ import CoreGraphics
 import CoreText
 import Darwin
 
-private enum SearchCheckError: LocalizedError {
-    case failed(String)
-    var errorDescription: String? { if case .failed(let message) = self { return "Search self-check: \(message)" }; return nil }
-}
-
 private func requireSearch(_ condition: Bool, _ message: String) throws {
-    guard condition else { throw SearchCheckError.failed(message) }
+    guard condition else { throw OperationFailure.message("Search self-check: " + message) }
     assert(condition, message)
 }
 
@@ -198,7 +193,7 @@ extension NaturalQuery {
 
 private func makeSearchPDF(at url: URL, text: String) throws {
     guard let consumer = CGDataConsumer(url: url as CFURL), let context = CGContext(consumer: consumer, mediaBox: nil, nil) else {
-        throw SearchCheckError.failed("cannot create temporary PDF")
+        throw OperationFailure.message("Search self-check: cannot create temporary PDF")
     }
     context.beginPDFPage(nil)
     let font = CTFontCreateWithName("Helvetica" as CFString, 20, nil)
