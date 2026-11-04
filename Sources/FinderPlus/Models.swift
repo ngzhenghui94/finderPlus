@@ -181,7 +181,7 @@ struct SavedSearch: Identifiable, Codable {
     private var generation = UUID()
     private var watcher: DispatchSourceFileSystemObject?
     private var reloadTimer: Timer?
-    private var loadTask: Task<Result<[FileEntry], Error>, Never>?
+    private var loadTask: Task<Result<[[FileEntry]], Error>, Never>?
     private var columnToken = UUID()
     private var searchTimer: Timer?
     private var searchObservation: AnyCancellable?
@@ -314,13 +314,21 @@ struct SavedSearch: Identifiable, Codable {
         changed?()
     }
     func selectTab(_ id: UUID) { activeTab = id; query = ""; savedSearchRoots = nil; filter = ""; selection = []; search.cancel(); load(); changed?() }
-    func load() {
+    /// `refresh`: the same folder changed on disk, so keep the open columns and relist them instead of starting over.
+    func load(refresh: Bool = false) {
         generation = UUID(); let token = generation, folder = url, hidden = AppPreferences.shared.showHidden
         if entries.first?.url.deletingLastPathComponent().standardizedFileURL != folder.standardizedFileURL { entries = []; selectionAnchor = nil }
-        loading = true; slowLoad = false; error = ""; columnFolders = [folder]; columnEntries = []; columnToken = UUID()
+        let open = refresh && columnFolders.first == folder ? columnFolders : [folder]
+        loading = true; slowLoad = false; error = ""
+        if open.count == 1 { columnFolders = [folder]; columnEntries = []; columnToken = UUID() }
         loadTask?.cancel()
-        let work = Task.detached(priority: .userInitiated) { () -> Result<[FileEntry], Error> in
-            Result { try BrowserPane.listing(folder, hidden: hidden) }
+        let work = Task.detached(priority: .userInitiated) { () -> Result<[[FileEntry]], Error> in
+            Result {
+                var lists = [try BrowserPane.listing(folder, hidden: hidden)]
+                // A column whose folder was moved or deleted closes, with every column after it.
+                for column in open.dropFirst() { guard let list = try? BrowserPane.listing(column, hidden: hidden) else { break }; lists.append(list) }
+                return lists
+            }
         }
         loadTask = work
         // A privacy prompt or a hung network disk blocks listing with no error; say so instead of spinning silently.
@@ -328,7 +336,18 @@ struct SavedSearch: Identifiable, Codable {
         Task {
             let result = await work.value
             guard generation == token else { return }
-            switch result { case .success(let files): entries = files; columnEntries = [files]; case .failure(let failure): entries = []; error = failure.localizedDescription }
+            switch result {
+            case .success(let lists):
+                entries = lists[0]
+                // Clicking another folder while relisting already replaced the columns; keep that newer choice.
+                if columnFolders == open {
+                    columnFolders = Array(open.prefix(lists.count)); columnEntries = lists; columnToken = UUID()
+                    // Drop selected items that were renamed, moved or deleted, so later commands never act on stale paths.
+                    let listed = Set(lists.joined().map(\.id))
+                    if query.isEmpty, !selection.isSubset(of: listed) { selection = selection.intersection(listed) }
+                } else if columnFolders.first == folder, !columnEntries.isEmpty { columnEntries[0] = lists[0] }
+            case .failure(let failure): entries = []; error = failure.localizedDescription
+            }
             loading = false; slowLoad = false
             watch(folder)
         }
@@ -341,7 +360,7 @@ struct SavedSearch: Identifiable, Codable {
         // Coalesce bursts (a copy into this folder fires an event per file) into one reload.
         source.setEventHandler { [weak self] in
             self?.reloadTimer?.invalidate()
-            self?.reloadTimer = Timer.scheduledTimer(withTimeInterval: 0.3, repeats: false) { [weak self] _ in Task { @MainActor in self?.load() } }
+            self?.reloadTimer = Timer.scheduledTimer(withTimeInterval: 0.3, repeats: false) { [weak self] _ in Task { @MainActor in self?.load(refresh: true) } }
         }
         source.setCancelHandler { close(fd) }; watcher = source; source.resume()
     }

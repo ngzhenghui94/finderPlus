@@ -22,6 +22,12 @@ import Foundation
         _ = pane.moveInColumns(125); try await wait("↓ moves within the column") { selected("a/x.txt") && pane.columnEntries.count == 2 }
         pane.typeSelectInColumns("y"); try await wait("type-select stays in the active column") { selected("a/y.txt") && pane.columnEntries.count == 2 }
         _ = pane.moveInColumns(123); try await wait("← returns to the parent and keeps its column") { selected("a") && pane.columnEntries.count == 2 }
+        // A change on disk (a finished operation or download) relists the open columns instead of closing them.
+        try Data().write(to: root.appendingPathComponent("a/z.txt"))
+        pane.load(refresh: true); try await wait("refresh keeps and relists open columns") { !pane.loading && selected("a") && pane.columnEntries.count == 2 && pane.columnEntries[1].count == 4 }
+        pane.chooseColumn(pane.columnEntries[1].first { $0.name == "y.txt" }!, at: 1)
+        try fm.removeItem(at: root.appendingPathComponent("a/y.txt"))
+        pane.load(refresh: true); try await wait("refresh drops a deleted selection") { !pane.loading && pane.selection.isEmpty && pane.columnEntries.count == 2 && pane.columnEntries[1].count == 3 }
         pane.load(); try await wait("reload") { !pane.loading }
         pane.selection = []
         _ = pane.moveInColumns(125); _ = pane.moveInColumns(124) // → immediately, before the folder's column has loaded

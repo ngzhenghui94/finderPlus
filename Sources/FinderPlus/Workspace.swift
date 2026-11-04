@@ -58,7 +58,7 @@ import UniformTypeIdentifiers
                 self?.shelf.removeAll { !FileManager.default.fileExists(atPath: $0.path) } // moved, trashed or renamed away
                 self?.panes.forEach { $0.search.cancel() }
                 await SearchService.invalidateCache()
-                self?.panes.forEach { $0.load(); if !$0.query.isEmpty { $0.runSearch() } }
+                self?.panes.forEach { $0.load(refresh: true); if !$0.query.isEmpty { $0.runSearch() } }
             }
         })
         observations.append(NotificationCenter.default.addObserver(forName: UserDefaults.didChangeNotification, object: nil, queue: .main) { [weak self] _ in

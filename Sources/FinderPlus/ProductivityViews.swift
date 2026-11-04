@@ -218,6 +218,8 @@ struct InfoView: View {
     @State private var error: String?
     @State private var message = ""
     @State private var folderSize: Int64?
+    /// Folders and bundles (.app, .photoslibrary): their size is the sum of their contents.
+    @State private var measuresContents = false
     @State private var sharing: [(String, String)] = []
     @Environment(\.dismiss) private var dismiss
 
@@ -231,7 +233,7 @@ struct InfoView: View {
                 LabeledContent("Location") { Text(url.path).textSelection(.enabled) }
                 if let entry {
                     LabeledContent("Kind", value: entry.kind)
-                    if entry.isDirectory {
+                    if entry.isDirectory || measuresContents {
                         LabeledContent("Size") { if let folderSize { Text(ByteCountFormatter.string(fromByteCount: folderSize, countStyle: .file)) } else { ProgressView().controlSize(.small) } }
                     } else { LabeledContent("Size", value: ByteCountFormatter.string(fromByteCount: entry.size, countStyle: .file)) }
                     LabeledContent("Cloud", value: CloudLocations.status(url))
@@ -257,7 +259,7 @@ struct InfoView: View {
                 Button("Save Metadata") { save() }.disabled(loadedMetadata == nil)
             }
         }.padding(20).frame(width: 660, height: 620).onAppear { load() }
-        .task(id: url) { if entry?.isDirectory == true || (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true { let target = url; folderSize = await measuredSize([target]) } }
+        .task(id: url) { if (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true { measuresContents = true; let target = url; folderSize = await measuredSize([target]) } }
     }
 
     private func load() {

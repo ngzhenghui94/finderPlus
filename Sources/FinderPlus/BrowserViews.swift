@@ -31,7 +31,7 @@ struct BrowserWindowContent: View {
         .searchFocused($searchFocused)
         .onSubmit(of: .search) { pane.runSearch() }
         .sheet(isPresented: $workspace.showQuickOpen) { QuickOpenView(workspace: workspace) }
-        .onChange(of: preferences.showHidden) { _, _ in workspace.panes.forEach { $0.load() } }
+        .onChange(of: preferences.showHidden) { _, _ in workspace.panes.forEach { $0.load(refresh: true) } }
         .onChange(of: pane.query) { _, _ in pane.runSearch() }
         .onChange(of: workspace.focusSearch) { _, _ in searchFocused = true }
     }
@@ -296,7 +296,7 @@ struct PaneView: View {
             ScrollView(.horizontal) {
                 HStack(spacing: 12) {
                     ForEach(pane.shown) { item in
-                        VStack { FileIcon(url: item.url, size: 64); Text(item.name).font(.system(size: 10)).lineLimit(1) }.padding(7).frame(width: 95).background(pane.selection.contains(item.id) ? Color.accentColor.opacity(0.16) : .clear, in: RoundedRectangle(cornerRadius: 6)).onTapGesture { workspace.activate(pane); workspace.select(item) }.onTapGesture(count: 2) { workspace.open([item.url]) }.contextMenu { FileContextMenu(workspace: workspace, pane: pane, entry: item) }.onDrag { drag(item) }
+                        VStack { FileIcon(url: item.url, size: 64); Text(item.name).font(.system(size: 10)).lineLimit(1) }.padding(7).frame(width: 95).background(pane.selection.contains(item.id) ? Color.accentColor.opacity(0.16) : .clear, in: RoundedRectangle(cornerRadius: 6)).onTapGesture(count: 2) { workspace.activate(pane); workspace.open([item.url]) }.onTapGesture { workspace.activate(pane); workspace.select(item) }.contextMenu { FileContextMenu(workspace: workspace, pane: pane, entry: item) }.onDrag { drag(item) }
                     }
                 }.padding(10)
             }.frame(height: 115)
