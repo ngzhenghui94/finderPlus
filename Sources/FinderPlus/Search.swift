@@ -262,7 +262,9 @@ private struct QueryParser {
                 relation = prefix; dateText = String(value.dropFirst(prefix.count)); break
             }
             if dateText.hasSuffix("d"), let days = Int(dateText.dropLast()), days > 0, days <= 36500, let cutoff = calendar.date(byAdding: .day, value: -days, to: now) {
-                return relation.hasPrefix("<") ? .date(field, cutoff, now.addingTimeInterval(0.001)) : .date(field, nil, cutoff)
+                // "<7d" means younger than 7 days, but before:/after: name the side of the cutoff.
+                let newer = key == "after" || (key != "before" && relation.hasPrefix("<"))
+                return newer ? .date(field, cutoff, now.addingTimeInterval(0.001)) : .date(field, nil, cutoff)
             }
             if let date = isoDate(dateText), let next = calendar.date(byAdding: .day, value: 1, to: date) {
                 switch relation {

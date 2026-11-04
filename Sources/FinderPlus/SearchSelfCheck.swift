@@ -88,6 +88,8 @@ extension NaturalQuery {
         try manager.setAttributes([.modificationDate: now.addingTimeInterval(-40 * 86400)], ofItemAtPath: archive.path)
         try requireSearch(parse("archives older than 30 days", now: now).matches(try FileEntry(url: archive)), "archive age phrase")
         try requireSearch(parse("mtime:<7d", now: now).matches(try FileEntry(url: sheet)), "relative modified-date operator")
+        try requireSearch(parse("after:7d", now: now).matches(try FileEntry(url: sheet)) && !parse("after:7d", now: now).matches(try FileEntry(url: archive)), "after:Nd finds newer files")
+        try requireSearch(parse("before:7d", now: now).matches(try FileEntry(url: archive)) && !parse("before:7d", now: now).matches(try FileEntry(url: sheet)), "before:Nd finds older files")
         try requireSearch(!parse("!planning", now: now).matches(try FileEntry(url: sheet)), "bang exclusion")
         try requireSearch(parse("\"screenshots last week\"", now: now).matches(literalEntry), "quoted phrase stays literal")
         try requireSearch(!parse("\"screenshots last week\"", now: now).matches(screenshotEntry), "quoted phrase does not become date predicates")
