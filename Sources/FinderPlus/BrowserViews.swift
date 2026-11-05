@@ -134,6 +134,7 @@ struct PaneView: View {
             HSplitView {
                 content.frame(maxWidth: .infinity, maxHeight: .infinity)
                     .contentShape(Rectangle())
+                    .simultaneousGesture(TapGesture().onEnded { focusFiles() })
                     .contextMenu { folderMenu }
                 if workspace.previewVisible, let path = pane.selection.sorted().first {
                     FilePreview(entry: try? FileEntry(url: URL(fileURLWithPath: path)), compact: true).frame(minWidth: 200, idealWidth: 260, maxWidth: 400)
@@ -160,28 +161,31 @@ struct PaneView: View {
     }
     var tabStrip: some View {
         HStack(spacing: 0) {
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 0) {
-                    ForEach(pane.tabs) { tab in
-                        HStack(spacing: 0) {
-                            Button { workspace.activate(pane); pane.selectTab(tab.id) } label: {
-                                HStack(spacing: 7) {
-                                    Image(systemName: "folder.fill").foregroundStyle(.tint).font(.system(size: 12))
-                                    Text(tab.url.path == "/" ? "Macintosh HD" : tab.url.lastPathComponent).lineLimit(1).truncationMode(.middle).font(.system(size: 12))
-                                }.padding(.horizontal, 10).frame(minWidth: 90, maxWidth: 200, minHeight: 34, alignment: .leading).contentShape(Rectangle())
-                            }.buttonStyle(.plain).foregroundStyle(.primary)
-                                .accessibilityAddTraits(tab.id == pane.activeTab ? .isSelected : [])
-                            if pane.tabs.count > 1 {
-                                Button { workspace.activate(pane); pane.closeTab(tab.id) } label: {
-                                    Image(systemName: "xmark").font(.system(size: 10)).frame(width: 26, height: 30).contentShape(Rectangle())
-                                }.buttonStyle(.plain).help("Close Tab").accessibilityLabel("Close \(tab.url.lastPathComponent) tab")
-                            }
-                        }.help(tab.url.path)
-                            .background(tab.id == pane.activeTab ? Color(nsColor: .textBackgroundColor) : Color.clear)
-                            .overlay(alignment: .top) { if tab.id == pane.activeTab && workspace.activeID == pane.id { Rectangle().fill(Color.accentColor).frame(height: 2) } }
-                            .contextMenu { Button("Close Tab") { pane.closeTab(tab.id) }; Button("Move Tab to New Pane") { workspace.activate(pane); pane.selectTab(tab.id); workspace.split(vertical: true, moveTab: true) } }
+            ScrollViewReader { proxy in
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 0) {
+                        ForEach(pane.tabs) { tab in
+                            HStack(spacing: 0) {
+                                Button { workspace.activate(pane); pane.selectTab(tab.id) } label: {
+                                    HStack(spacing: 7) {
+                                        Image(systemName: "folder.fill").foregroundStyle(.tint).font(.system(size: 12))
+                                        Text(tab.url.path == "/" ? "Macintosh HD" : tab.url.lastPathComponent).lineLimit(1).truncationMode(.middle).font(.system(size: 12))
+                                    }.padding(.horizontal, 10).frame(minWidth: 90, maxWidth: 200, minHeight: 34, alignment: .leading).contentShape(Rectangle())
+                                }.buttonStyle(.plain).foregroundStyle(.primary)
+                                    .accessibilityAddTraits(tab.id == pane.activeTab ? .isSelected : [])
+                                if pane.tabs.count > 1 {
+                                    Button { workspace.activate(pane); pane.closeTab(tab.id) } label: {
+                                        Image(systemName: "xmark").font(.system(size: 10)).frame(width: 26, height: 30).contentShape(Rectangle())
+                                    }.buttonStyle(.plain).help("Close Tab").accessibilityLabel("Close \(tab.url.lastPathComponent) tab")
+                                }
+                            }.help(tab.url.path).id(tab.id)
+                                .background(tab.id == pane.activeTab ? Color(nsColor: .textBackgroundColor) : Color.clear)
+                                .overlay(alignment: .top) { if tab.id == pane.activeTab && workspace.activeID == pane.id { Rectangle().fill(Color.accentColor).frame(height: 2) } }
+                                .contextMenu { Button("Close Tab") { pane.closeTab(tab.id) }; Button("Move Tab to New Pane") { workspace.activate(pane); pane.selectTab(tab.id); workspace.split(vertical: true, moveTab: true) } }
+                        }
                     }
                 }
+                .onChange(of: pane.activeTab, initial: true) { _, id in proxy.scrollTo(id) }
             }
             Button { workspace.activate(pane); pane.newTab() } label: { Image(systemName: "plus").frame(width: 28, height: 28).contentShape(Rectangle()) }.help("New Pane Tab").accessibilityLabel("New Pane Tab")
             Button { workspace.activate(pane); workspace.split(vertical: true) } label: { Image(systemName: "rectangle.split.2x1").frame(width: 28, height: 28).contentShape(Rectangle()) }.help("Split Right").accessibilityLabel("Split Right")
@@ -255,88 +259,123 @@ struct PaneView: View {
         Button("Paste Here") { workspace.activate(pane); workspace.paste() }
     }
     var list: some View {
-        Table(of: FileEntry.self, selection: $pane.selection) {
-            TableColumn("Name") { item in
-                HStack(spacing: 6) {
-                    FileIcon(url: item.url, size: 18); Text(item.name).lineLimit(1); TagDots(tags: item.tags, colors: item.tagColors); cloud(item)
-                    if !pane.query.isEmpty, item.url.deletingLastPathComponent().path != kernelPath(pane.url) { Text("in " + item.url.deletingLastPathComponent().lastPathComponent).foregroundStyle(.tertiary).lineLimit(1).help(item.url.deletingLastPathComponent().path) }
+        ScrollViewReader { proxy in
+            Table(of: FileEntry.self, selection: $pane.selection) {
+                TableColumn("Name") { item in
+                    HStack(spacing: 6) {
+                        FileIcon(url: item.url, size: 18); Text(item.name).lineLimit(1); TagDots(tags: item.tags, colors: item.tagColors); cloud(item)
+                        if !pane.query.isEmpty, item.url.deletingLastPathComponent().path != kernelPath(pane.url) { Text("in " + item.url.deletingLastPathComponent().lastPathComponent).foregroundStyle(.tertiary).lineLimit(1).help(item.url.deletingLastPathComponent().path) }
+                    }
+                        .contextMenu { FileContextMenu(workspace: workspace, pane: pane, entry: item) }.onDrag { drag(item) }
+                }.width(min: 140, ideal: 250)
+                TableColumn("Date Modified") { item in Text(item.modified.formatted(date: .abbreviated, time: .shortened)).foregroundStyle(.secondary).font(.system(size: 11)) }.width(min: 110, ideal: 160)
+                TableColumn("Size") { item in Text(item.isDirectory ? "—" : ByteCountFormatter.string(fromByteCount: item.size, countStyle: .file)).foregroundStyle(.secondary).font(.system(size: 11)) }.width(min: 55, ideal: 70)
+                TableColumn("Kind") { item in Text(item.kind).foregroundStyle(.secondary).font(.system(size: 11)).lineLimit(1) }.width(min: 70, ideal: 115)
+                TableColumn("Tags") { item in Text(item.tags.joined(separator: ", ")).foregroundStyle(.secondary).font(.system(size: 11)).lineLimit(1) }.width(min: 40, ideal: 90)
+            } rows: {
+                ForEach(groups, id: \.name) { group in
+                    if preferences.groupBy == .none { ForEach(group.entries) { TableRow($0) } }
+                    else { Section { ForEach(group.entries) { TableRow($0) } } header: { Text("\(group.name)  ·  \(group.entries.count)") } }
                 }
-                    .contextMenu { FileContextMenu(workspace: workspace, pane: pane, entry: item) }.onDrag { drag(item) }
-            }.width(min: 140, ideal: 250)
-            TableColumn("Date Modified") { item in Text(item.modified.formatted(date: .abbreviated, time: .shortened)).foregroundStyle(.secondary).font(.system(size: 11)) }.width(min: 110, ideal: 160)
-            TableColumn("Size") { item in Text(item.isDirectory ? "—" : ByteCountFormatter.string(fromByteCount: item.size, countStyle: .file)).foregroundStyle(.secondary).font(.system(size: 11)) }.width(min: 55, ideal: 70)
-            TableColumn("Kind") { item in Text(item.kind).foregroundStyle(.secondary).font(.system(size: 11)).lineLimit(1) }.width(min: 70, ideal: 115)
-            TableColumn("Tags") { item in Text(item.tags.joined(separator: ", ")).foregroundStyle(.secondary).font(.system(size: 11)).lineLimit(1) }.width(min: 40, ideal: 90)
-        } rows: {
-            ForEach(groups, id: \.name) { group in
-                if preferences.groupBy == .none { ForEach(group.entries) { TableRow($0) } }
-                else { Section { ForEach(group.entries) { TableRow($0) } } header: { Text("\(group.name)  ·  \(group.entries.count)") } }
+            }
+            .contextMenu(forSelectionType: String.self) { ids in
+                if let id = ids.first, let entry = pane.shown.first(where: { $0.id == id }) { FileContextMenu(workspace: workspace, pane: pane, entry: entry) }
+                else { Button("New Folder…") { workspace.activate(pane); workspace.newFolder() } }
+            } primaryAction: { ids in workspace.activate(pane); workspace.open(ids.map { URL(fileURLWithPath: $0) }) }
+            .onChange(of: pane.selectionToReveal, initial: true) { _, id in
+                guard let id else { return }
+                proxy.scrollTo(id)
+                // Table estimates offscreen row heights until the first scroll lays them out.
+                DispatchQueue.main.async { if pane.selectionToReveal == id { proxy.scrollTo(id) } }
             }
         }
-        .contextMenu(forSelectionType: String.self) { ids in
-            if let id = ids.first, let entry = pane.shown.first(where: { $0.id == id }) { FileContextMenu(workspace: workspace, pane: pane, entry: entry) }
-            else { Button("New Folder…") { workspace.activate(pane); workspace.newFolder() } }
-        } primaryAction: { ids in workspace.activate(pane); workspace.open(ids.map { URL(fileURLWithPath: $0) }) }
     }
     var groups: [(name: String, entries: [FileEntry])] { preferences.groupBy.groups(pane.shown) }
     var icons: some View {
-        ScrollView {
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: preferences.iconSize + 46), spacing: 14)], spacing: 18, pinnedViews: [.sectionHeaders]) {
-                ForEach(groups, id: \.name) { group in
-                    Section {
-                        ForEach(group.entries) { item in
-                            VStack(spacing: 6) { FileIcon(url: item.url, size: preferences.iconSize); HStack(spacing: 4) { TagDots(tags: item.tags, colors: item.tagColors); Text(item.name).font(.system(size: 12)).lineLimit(2).multilineTextAlignment(.center) }; cloud(item) }
-                                .padding(8).frame(maxWidth: .infinity).frame(height: preferences.iconSize + 65, alignment: .top)
-                                .background(pane.selection.contains(item.id) ? Color.accentColor.opacity(0.18) : .clear, in: RoundedRectangle(cornerRadius: 7))
-                                .contentShape(Rectangle()).onTapGesture(count: 2) { workspace.activate(pane); workspace.open([item.url]) }
-                                .onTapGesture { workspace.activate(pane); workspace.select(item) }
-                                .help(item.url.path)
-                                .contextMenu { FileContextMenu(workspace: workspace, pane: pane, entry: item) }.onDrag { drag(item) }
-                                .onDrop(of: [.fileURL], isTargeted: nil) { item.isDirectory && acceptDrop($0, destination: item.url) }
-                        }
-                    } header: {
-                        if preferences.groupBy != .none {
-                            HStack { Text(group.name).font(.system(size: 11, weight: .semibold)); Text("\(group.entries.count)").font(.system(size: 11)).foregroundStyle(.secondary); Spacer() }
-                                .padding(.horizontal, 4).padding(.vertical, 5).background(.bar)
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: preferences.iconSize + 46), spacing: 14)], spacing: 18, pinnedViews: [.sectionHeaders]) {
+                    ForEach(groups, id: \.name) { group in
+                        Section {
+                            ForEach(group.entries) { item in
+                                VStack(spacing: 6) { FileIcon(url: item.url, size: preferences.iconSize); HStack(spacing: 4) { TagDots(tags: item.tags, colors: item.tagColors); Text(item.name).font(.system(size: 12)).lineLimit(2).multilineTextAlignment(.center) }; cloud(item) }
+                                    .padding(8).frame(maxWidth: .infinity).frame(height: preferences.iconSize + 65, alignment: .top)
+                                    .background(pane.selection.contains(item.id) ? Color.accentColor.opacity(0.18) : .clear, in: RoundedRectangle(cornerRadius: 7))
+                                    .contentShape(Rectangle()).onTapGesture(count: 2) { focusFiles(); workspace.open([item.url]) }
+                                    .onTapGesture { focusFiles(); workspace.select(item) }
+                                    .help(item.url.path).id(item.id)
+                                    .accessibilityElement(children: .combine).accessibilityAddTraits(.isButton)
+                                    .accessibilityAddTraits(pane.selection.contains(item.id) ? .isSelected : [])
+                                    .accessibilityAction { focusFiles(); workspace.select(item) }
+                                    .accessibilityAction(named: "Open") { focusFiles(); workspace.open([item.url]) }
+                                    .contextMenu { FileContextMenu(workspace: workspace, pane: pane, entry: item) }.onDrag { drag(item) }
+                                    .onDrop(of: [.fileURL], isTargeted: nil) { item.isDirectory && acceptDrop($0, destination: item.url) }
+                            }
+                        } header: {
+                            if preferences.groupBy != .none {
+                                HStack { Text(group.name).font(.system(size: 11, weight: .semibold)); Text("\(group.entries.count)").font(.system(size: 11)).foregroundStyle(.secondary); Spacer() }
+                                    .padding(.horizontal, 4).padding(.vertical, 5).background(.bar)
+                            }
                         }
                     }
-                }
-            }.padding(18)
+                }.padding(18)
+            }
+            .onChange(of: pane.selectionToReveal, initial: true) { _, id in if let id { proxy.scrollTo(id) } }
         }
     }
     var columns: some View {
-        ScrollView(.horizontal) {
-            HStack(spacing: 0) {
-                ForEach(Array(pane.columnEntries.enumerated()), id: \.offset) { index, entries in
-                    ScrollView {
-                        LazyVStack(spacing: 1) {
-                            ForEach(pane.sorted(index == 0 && !pane.query.isEmpty ? pane.shown : entries)) { item in
-                                HStack(spacing: 6) { FileIcon(url: item.url, size: 17); Text(item.name).font(.system(size: 12)).lineLimit(1); Spacer(); cloud(item); if item.isDirectory { Image(systemName: "chevron.right").font(.system(size: 9)).foregroundStyle(.secondary) } }
-                                    .padding(.horizontal, 7).frame(height: 28).background(pane.selection.contains(item.id) || pane.columnFolders.contains(item.url) ? Color.accentColor.opacity(0.16) : .clear, in: RoundedRectangle(cornerRadius: 5))
-                                    .contentShape(Rectangle()).onTapGesture(count: 2) { workspace.activate(pane); workspace.open([item.url]) }
-                                    .onTapGesture { workspace.activate(pane); pane.chooseColumn(item, at: index) }
-                                    .help(item.url.path)
-                                    .contextMenu { FileContextMenu(workspace: workspace, pane: pane, entry: item) }.onDrag { drag(item) }
+        ScrollViewReader { proxy in
+            ScrollView(.horizontal) {
+                HStack(spacing: 0) {
+                    ForEach(Array(pane.columnEntries.enumerated()), id: \.offset) { index, entries in
+                        ScrollViewReader { columnProxy in
+                            ScrollView {
+                                LazyVStack(spacing: 1) {
+                                    ForEach(pane.sorted(index == 0 && !pane.query.isEmpty ? pane.shown : entries)) { item in
+                                        HStack(spacing: 6) { FileIcon(url: item.url, size: 17); Text(item.name).font(.system(size: 12)).lineLimit(1); Spacer(); cloud(item); if item.isDirectory { Image(systemName: "chevron.right").font(.system(size: 9)).foregroundStyle(.secondary) } }
+                                            .padding(.horizontal, 7).frame(height: 28).background(pane.selection.contains(item.id) || pane.columnFolders.contains(item.url) ? Color.accentColor.opacity(0.16) : .clear, in: RoundedRectangle(cornerRadius: 5))
+                                            .contentShape(Rectangle()).onTapGesture(count: 2) { focusFiles(); workspace.open([item.url]) }
+                                            .onTapGesture { focusFiles(); pane.chooseColumn(item, at: index) }
+                                            .help(item.url.path).id(item.id)
+                                            .accessibilityElement(children: .combine).accessibilityAddTraits(.isButton)
+                                            .accessibilityAddTraits(pane.selection.contains(item.id) ? .isSelected : [])
+                                            .accessibilityAction { focusFiles(); pane.chooseColumn(item, at: index) }
+                                            .accessibilityAction(named: "Open") { focusFiles(); workspace.open([item.url]) }
+                                            .contextMenu { FileContextMenu(workspace: workspace, pane: pane, entry: item) }.onDrag { drag(item) }
+                                    }
+                                }.padding(6)
                             }
-                        }.padding(6)
-                    }.frame(width: 235)
-                    Divider()
+                            .onChange(of: pane.selectionToReveal, initial: true) { _, id in if let id { columnProxy.scrollTo(id) } }
+                        }.frame(width: 235).id(index)
+                        Divider()
+                    }
+                    if let path = pane.selection.sorted().first { FilePreview(entry: try? FileEntry(url: URL(fileURLWithPath: path)), compact: true).frame(width: 280) }
                 }
-                if let path = pane.selection.sorted().first { FilePreview(entry: try? FileEntry(url: URL(fileURLWithPath: path)), compact: true).frame(width: 280) }
             }
+            .onChange(of: pane.selectedColumn, initial: true) { _, column in if let column { proxy.scrollTo(column) } }
+            .onChange(of: pane.columnEntries.count) { previousCount, count in if count > previousCount { proxy.scrollTo(count - 1, anchor: .trailing) } }
         }
     }
     var gallery: some View {
         VStack(spacing: 0) {
             FilePreview(entry: pane.shown.first(where: { pane.selection.contains($0.id) }) ?? pane.shown.first).frame(maxHeight: .infinity)
             Divider()
-            ScrollView(.horizontal) {
-                HStack(spacing: 12) {
-                    ForEach(pane.shown) { item in
-                        VStack { FileIcon(url: item.url, size: 64); Text(item.name).font(.system(size: 11)).lineLimit(1) }.padding(7).frame(width: 95).background(pane.selection.contains(item.id) ? Color.accentColor.opacity(0.16) : .clear, in: RoundedRectangle(cornerRadius: 6)).contentShape(Rectangle()).onTapGesture(count: 2) { workspace.activate(pane); workspace.open([item.url]) }.onTapGesture { workspace.activate(pane); workspace.select(item) }.help(item.url.path).contextMenu { FileContextMenu(workspace: workspace, pane: pane, entry: item) }.onDrag { drag(item) }
-                    }
-                }.padding(10)
-            }.frame(height: 115)
+            ScrollViewReader { proxy in
+                ScrollView(.horizontal) {
+                    HStack(spacing: 12) {
+                        ForEach(pane.shown) { item in
+                            VStack { FileIcon(url: item.url, size: 64); Text(item.name).font(.system(size: 11)).lineLimit(1) }.padding(7).frame(width: 95).background(pane.selection.contains(item.id) ? Color.accentColor.opacity(0.16) : .clear, in: RoundedRectangle(cornerRadius: 6)).contentShape(Rectangle()).onTapGesture(count: 2) { focusFiles(); workspace.open([item.url]) }.onTapGesture { focusFiles(); workspace.select(item) }.help(item.url.path).id(item.id).accessibilityElement(children: .combine).accessibilityAddTraits(.isButton).accessibilityAddTraits(pane.selection.contains(item.id) ? .isSelected : []).accessibilityAction { focusFiles(); workspace.select(item) }.accessibilityAction(named: "Open") { focusFiles(); workspace.open([item.url]) }.contextMenu { FileContextMenu(workspace: workspace, pane: pane, entry: item) }.onDrag { drag(item) }
+                        }
+                    }.padding(10)
+                }.frame(height: 115)
+                .onChange(of: pane.selectionToReveal, initial: true) { _, id in if let id { proxy.scrollTo(id) } }
+            }
+        }
+    }
+    func focusFiles() {
+        workspace.activate(pane)
+        if let editor = workspace.window?.firstResponder as? NSTextView, editor.isFieldEditor {
+            workspace.window?.makeFirstResponder(nil)
         }
     }
     @ViewBuilder func cloud(_ item: FileEntry) -> some View {

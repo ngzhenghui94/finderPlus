@@ -228,6 +228,8 @@ struct SavedSearch: Identifiable, Codable {
     }
     var selectionAnchor: String?
     private var selectionCursor: String?
+    // Reveal the moving end of a keyboard range, not its stationary anchor.
+    var selectionToReveal: String? { selectionCursor ?? (selection.count == 1 ? selection.first : nil) }
     var selected: [URL] { selection.sorted().map { URL(fileURLWithPath: $0) } }
     /// Sorted once per change of entries, results, filter or sort order, not on every redraw.
     private var shownCache: (foldersFirst: Bool, value: [FileEntry])?
@@ -275,7 +277,7 @@ struct SavedSearch: Identifiable, Codable {
         return true
     }
     /// The column holding the single selected item.
-    private var selectedColumn: Int? {
+    var selectedColumn: Int? {
         guard selection.count == 1, let id = selection.first else { return nil }
         return columnEntries.lastIndex { $0.contains { $0.id == id } }
     }

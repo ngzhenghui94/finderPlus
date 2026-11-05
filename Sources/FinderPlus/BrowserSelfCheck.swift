@@ -158,22 +158,28 @@ import Foundation
         pane.sortKey = "Name"; pane.ascending = true
         let visible = pane.displayed
         pane.selection = [visible[0].id]
+        guard pane.selectionToReveal == visible[0].id else { throw OperationFailure.message("A single selection must be revealed") }
         pane.moveSelection(by: 1, extending: true)
         pane.moveSelection(by: 1, extending: true)
-        guard pane.selection == Set(visible.prefix(3).map(\.id)) else {
+        guard pane.selection == Set(visible.prefix(3).map(\.id)), pane.selectionToReveal == visible[2].id else {
             throw OperationFailure.message("Repeated Shift–Down stops extending the selection")
         }
         pane.moveSelection(by: -1, extending: true)
-        guard pane.selection == Set(visible.prefix(2).map(\.id)) else {
+        guard pane.selection == Set(visible.prefix(2).map(\.id)), pane.selectionToReveal == visible[1].id else {
             throw OperationFailure.message("Reversing Shift–Down does not shrink the range")
         }
         pane.selection = [visible[1].id]
         pane.moveSelection(by: -1, extending: true)
+        guard pane.selectionToReveal == visible[0].id else { throw OperationFailure.message("An upward range must reveal its moving end") }
         pane.moveSelection(by: 1, extending: true)
         pane.moveSelection(by: 1, extending: true)
         guard pane.selection == Set(visible[1...2].map(\.id)) else {
             throw OperationFailure.message("Keyboard range selection loses its anchor across direction changes")
         }
+        pane.selection = Set(visible.prefix(2).map(\.id))
+        guard pane.selectionToReveal == nil else { throw OperationFailure.message("Mouse multi-selection must not jump to an arbitrary file") }
+        pane.selection = []
+        guard pane.selectionToReveal == nil else { throw OperationFailure.message("Clearing selection must clear the reveal target") }
         let defaults = UserDefaults.standard
         let oldRecent = defaults.object(forKey: "recentFolders")
         let wasRestoring = AppDelegate.shared.restoringWindows
