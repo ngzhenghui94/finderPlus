@@ -1,6 +1,26 @@
 import Foundation
 
 @MainActor enum BrowserSelfCheck {
+    static func searchFeedback() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("FinderPlus-search-feedback-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let pane = BrowserPane(url: root)
+        pane.query = "name:nonexistent"
+        let cases: [([URL], BrowserPane.EmptyState)] = [
+            ([], .searchNeedsAttention),
+            ([root.appendingPathComponent("missing")], .searchNeedsAttention),
+            ([root], .search)
+        ]
+        for (roots, expected) in cases {
+            pane.search.search(pane.query, roots: roots, includeHidden: false, contentEnabled: false, ocrEnabled: false)
+            for _ in 0..<300 where pane.search.isSearching { try await Task.sleep(for: .milliseconds(10)) }
+            guard !pane.search.isSearching, pane.emptyState == expected else {
+                throw OperationFailure.message("Search feedback must distinguish unavailable scope from a clean empty result; expected \(expected)")
+            }
+        }
+        print("Search feedback: missing scope, unavailable root, clean empty results PASS")
+    }
     /// Columns keys: ↑ with nothing selected, → before and after a column loads, ↓, type-select and ← keep their column.
     static func columns() async throws {
         let fm = FileManager.default
@@ -59,6 +79,26 @@ import Foundation
             return try FileEntry(url: url)
         }
         let entries = [try file("a.txt", bytes: 10, daysAgo: 0), try file("b.txt", bytes: 2_000_000, daysAgo: 1), try file("c.txt", bytes: 150_000, daysAgo: 5), try FileEntry(url: root.appendingPathComponent("folder"))]
+        let emptyPane = BrowserPane(url: root)
+        guard emptyPane.emptyState == .folder else { throw OperationFailure.message("An empty listing needs the empty-folder state") }
+        emptyPane.entries = entries
+        guard emptyPane.emptyState == nil else { throw OperationFailure.message("A populated folder must show its files") }
+        emptyPane.filter = "no matching file"
+        guard emptyPane.emptyState == .filtered else { throw OperationFailure.message("An unmatched filter must not claim the folder is empty") }
+        emptyPane.filter = ""
+        guard emptyPane.emptyState == nil else { throw OperationFailure.message("Clearing a filter must restore the listing") }
+        emptyPane.query = "no search results"
+        guard emptyPane.emptyState == .search else { throw OperationFailure.message("An unmatched search needs search recovery") }
+        emptyPane.search.results = entries
+        guard emptyPane.emptyState == nil else { throw OperationFailure.message("Search results must suppress empty feedback") }
+        emptyPane.filter = "no matching result"
+        guard emptyPane.emptyState == .filtered else { throw OperationFailure.message("A filter hiding search results needs filter recovery") }
+        emptyPane.error = "Folder unavailable"
+        guard emptyPane.emptyState == .unavailable else { throw OperationFailure.message("A failed load must take precedence over a filter or search") }
+        emptyPane.loading = true
+        guard emptyPane.emptyState == nil else { throw OperationFailure.message("Loading must not show an empty result") }
+        emptyPane.loading = false; emptyPane.search.isSearching = true
+        guard emptyPane.emptyState == nil else { throw OperationFailure.message("An active search must not show an empty result") }
         guard FileGrouping.modified.groups(Array(entries.prefix(3)), now: now).map(\.name) == ["Today", "Yesterday", "Previous 7 Days"],
               FileGrouping.size.groups(entries, now: now).map(\.name) == ["1 MB to 100 MB", "100 KB to 1 MB", "Under 100 KB", "Folders"],
               FileGrouping.none.groups(entries).first?.entries.count == 4,

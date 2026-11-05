@@ -204,6 +204,28 @@ struct SavedSearch: Identifiable, Codable {
     var snapshot: PaneSnapshot { PaneSnapshot(id: id, tabs: tabs, activeTab: activeTab) }
     var canGoBack: Bool { tabs.first(where: { $0.id == activeTab })?.back.isEmpty == false }
     var canGoForward: Bool { tabs.first(where: { $0.id == activeTab })?.forward.isEmpty == false }
+    enum EmptyState: String {
+        case folder = "This folder is empty"
+        case filtered = "No files match this filter"
+        case search = "No matching files"
+        case searchNeedsAttention = "Search needs attention"
+        case unavailable = "Couldn’t load this folder"
+        var symbol: String {
+            switch self {
+            case .folder: return "folder"
+            case .filtered: return "line.3.horizontal.decrease.circle"
+            case .search: return "magnifyingglass"
+            case .unavailable, .searchNeedsAttention: return "exclamationmark.triangle"
+            }
+        }
+    }
+    var emptyState: EmptyState? {
+        guard shown.isEmpty, !loading, !search.isSearching else { return nil }
+        if !error.isEmpty { return .unavailable }
+        if !query.isEmpty, search.results.isEmpty, !search.plan.warnings.isEmpty { return .searchNeedsAttention }
+        if !filter.isEmpty { return .filtered }
+        return query.isEmpty ? .folder : .search
+    }
     var selectionAnchor: String?
     private var selectionCursor: String?
     var selected: [URL] { selection.sorted().map { URL(fileURLWithPath: $0) } }

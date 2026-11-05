@@ -4,13 +4,14 @@ import UniformTypeIdentifiers
 
 struct SidebarView: View {
     @ObservedObject var workspace: Workspace
+    @ObservedObject var pane: BrowserPane
     @ObservedObject var preferences = AppPreferences.shared
     let home = FileManager.default.homeDirectoryForCurrentUser
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             ScrollView {
                 VStack(alignment: .leading, spacing: 3) {
-                    Button { workspace.active.query = "past 30 days"; workspace.active.searchAllRoots = true; workspace.active.runSearch() } label: { Label("Recents", systemImage: "clock").frame(maxWidth: .infinity, alignment: .leading) }.buttonStyle(SidebarButtonStyle(selected: false))
+                    Button { pane.savedSearchRoots = nil; pane.query = "past 30 days"; pane.searchAllRoots = true; pane.runSearch() } label: { Label("Recents", systemImage: "clock").frame(maxWidth: .infinity, alignment: .leading) }.buttonStyle(SidebarButtonStyle(selected: pane.query == "past 30 days" && pane.searchAllRoots && pane.savedSearchRoots == nil)).help("Files from the past 30 days in your approved search folders")
                     heading("Favorites")
                     row("Home", home, "house")
                     row("Desktop", home.appendingPathComponent("Desktop"), "desktopcomputer")
@@ -22,7 +23,7 @@ struct SidebarView: View {
                     if !workspace.savedSearches.isEmpty {
                         heading("Saved Searches")
                         ForEach(workspace.savedSearches) { search in
-                            Button { workspace.applySearch(search) } label: { Label(search.name, systemImage: "line.3.horizontal.decrease.circle").lineLimit(1).frame(maxWidth: .infinity, alignment: .leading) }.buttonStyle(SidebarButtonStyle(selected: false)).contextMenu { Button("Remove Saved Search") { workspace.savedSearches.removeAll { $0.id == search.id }; workspace.saveSidebar() } }
+                            Button { workspace.applySearch(search) } label: { Label(search.name, systemImage: "line.3.horizontal.decrease.circle").lineLimit(1).frame(maxWidth: .infinity, alignment: .leading) }.buttonStyle(SidebarButtonStyle(selected: pane.query == search.query && pane.savedSearchRoots == search.roots)).help(search.query).contextMenu { Button("Remove Saved Search") { workspace.savedSearches.removeAll { $0.id == search.id }; workspace.saveSidebar() } }
                         }
                     }
                     ForEach(workspace.groups, id: \.self) { group in
@@ -45,15 +46,16 @@ struct SidebarView: View {
                 }.padding(.horizontal, 10).padding(.top, 12)
             }
             Divider().padding(.horizontal, 12)
-            HStack(spacing: 8) { Image(systemName: "folder.badge.plus").font(.system(size: 20)).foregroundStyle(.tint); Text("FinderPlus").font(.system(size: 12, weight: .semibold)); Spacer(); Button { AppDelegate.shared.showSettings() } label: { Image(systemName: "gearshape") }.buttonStyle(.plain).help("Settings") }.padding(14)
+            HStack(spacing: 8) { Image(systemName: "folder.badge.plus").font(.system(size: 20)).foregroundStyle(.tint); Text("FinderPlus").font(.system(size: 12, weight: .semibold)); Spacer(); Button { AppDelegate.shared.showSettings() } label: { Image(systemName: "gearshape").frame(width: 28, height: 28).contentShape(Rectangle()) }.buttonStyle(.plain).help("Settings").accessibilityLabel("Settings") }.padding(12)
         }.background(.ultraThinMaterial)
         .contextMenu { Button("New Sidebar Group…") { workspace.newGroup() }; Button("Add Current Folder") { workspace.addFavorite() }; Button("Show Hidden Locations") { workspace.hiddenLocations = []; workspace.saveSidebar() } }
     }
     var volumes: [URL] { (FileManager.default.mountedVolumeURLs(includingResourceValuesForKeys: [.volumeIsInternalKey], options: [.skipHiddenVolumes]) ?? []).filter { $0.path != "/" && !$0.path.hasPrefix("/System/") && !workspace.hiddenLocations.contains($0.path) } }
-    func heading(_ title: String) -> some View { Text(title).font(.system(size: 10, weight: .semibold)).foregroundStyle(.secondary).padding(.top, 19).padding(.bottom, 5).padding(.leading, 8) }
+    func heading(_ title: String) -> some View { Text(title).font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary).padding(.top, 14).padding(.bottom, 4).padding(.leading, 8).accessibilityAddTraits(.isHeader) }
     func row(_ name: String, _ url: URL, _ icon: String, location: Bool = false) -> some View {
-        Button { workspace.active.navigate(url) } label: { Label(name, systemImage: icon).lineLimit(1).frame(maxWidth: .infinity, alignment: .leading) }
-            .buttonStyle(SidebarButtonStyle(selected: workspace.active.url.standardizedFileURL == url.standardizedFileURL))
+        Button { pane.navigate(url) } label: { Label(name, systemImage: icon).lineLimit(1).frame(maxWidth: .infinity, alignment: .leading) }
+            .buttonStyle(SidebarButtonStyle(selected: pane.query.isEmpty && pane.url.standardizedFileURL == url.standardizedFileURL))
+            .help(url.path)
             .contextMenu {
                 Button("Open in New Tab") { workspace.active.newTab(url) }
                 Button("Get Info") { AppDelegate.shared.show(title: "Information", view: AnyView(InfoView(url: url)), size: NSSize(width: 520, height: 650)) }
@@ -72,7 +74,26 @@ struct SidebarView: View {
 }
 struct SidebarButtonStyle: ButtonStyle {
     let selected: Bool
-    func makeBody(configuration: Configuration) -> some View { configuration.label.font(.system(size: 12)).padding(.horizontal, 8).padding(.vertical, 7).contentShape(Rectangle()).background(selected ? Color.primary.opacity(0.09) : configuration.isPressed ? Color.primary.opacity(0.05) : .clear, in: RoundedRectangle(cornerRadius: 6)) }
+    @State private var hovered = false
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .labelStyle(SidebarLabelStyle())
+            .font(.system(size: 13, weight: selected ? .medium : .regular))
+            .foregroundStyle(.primary)
+            .padding(.horizontal, 8).padding(.vertical, 6).frame(minHeight: 32)
+            .contentShape(Rectangle())
+            .background(selected ? Color.accentColor.opacity(configuration.isPressed ? 0.25 : 0.16) : Color.primary.opacity(configuration.isPressed ? 0.10 : hovered ? 0.05 : 0), in: RoundedRectangle(cornerRadius: 6))
+            .onHover { hovered = $0 }
+            .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+}
+private struct SidebarLabelStyle: LabelStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        HStack(spacing: 8) {
+            configuration.icon.font(.system(size: 14)).foregroundStyle(.tint).frame(width: 20)
+            configuration.title
+        }
+    }
 }
 
 struct ShelfView: View {

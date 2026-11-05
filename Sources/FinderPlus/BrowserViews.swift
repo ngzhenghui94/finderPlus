@@ -16,7 +16,7 @@ struct BrowserWindowContent: View {
     @FocusState private var searchFocused: Bool
     var body: some View {
         HSplitView {
-            if workspace.sidebarVisible { SidebarView(workspace: workspace).frame(minWidth: 170, idealWidth: 205, maxWidth: 300) }
+            if workspace.sidebarVisible { SidebarView(workspace: workspace, pane: pane).frame(minWidth: 170, idealWidth: 205, maxWidth: 300) }
             VStack(spacing: 0) {
                 if workspace.zoomed { PaneView(workspace: workspace, pane: workspace.active) }
                 else { LayoutView(workspace: workspace, layout: workspace.layout) }
@@ -118,9 +118,17 @@ struct PaneView: View {
             if workspace.pathVisible { breadcrumbs }
             if !pane.query.isEmpty { SearchSummary(pane: pane, workspace: workspace) }
             if showFilter {
-                TextField("Filter this folder", text: $pane.filter).textFieldStyle(.roundedBorder).focused($filterFocused).padding(8)
+                HStack(spacing: 8) {
+                    Image(systemName: "line.3.horizontal.decrease").foregroundStyle(.secondary)
+                    TextField("Filter this folder", text: $pane.filter).textFieldStyle(.roundedBorder).focused($filterFocused)
+                    Button("Clear") { workspace.activate(pane); pane.filter = "" }.disabled(pane.filter.isEmpty)
+                    Button { workspace.activate(pane); pane.filter = ""; showFilter = false } label: {
+                        Image(systemName: "xmark").frame(width: 24, height: 24).contentShape(Rectangle())
+                    }.buttonStyle(.plain).help("Close Filter (Esc)").accessibilityLabel("Close Filter")
+                }.padding(8)
+                    .onExitCommand { pane.filter = ""; showFilter = false }
             }
-            if !pane.error.isEmpty {
+            if !pane.error.isEmpty && pane.emptyState != .unavailable {
                 HStack { Image(systemName: "exclamationmark.triangle"); Text(pane.error).font(.callout); Spacer(); Button("Retry") { pane.load() } }.padding(12).foregroundStyle(.orange)
             }
             HSplitView {
@@ -140,7 +148,7 @@ struct PaneView: View {
                     Spacer()
                     if pane.query.isEmpty { Text(availableSpace).lineLimit(1) }
                     else { Text(pane.search.status).lineLimit(1) }
-                }.font(.system(size: 10)).foregroundStyle(.secondary).padding(.horizontal, 12).frame(height: 26)
+                }.font(.system(size: 11)).foregroundStyle(.secondary).padding(.horizontal, 12).frame(height: 28)
             }
         }
         .frame(minWidth: 200, minHeight: 160)
@@ -155,21 +163,29 @@ struct PaneView: View {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 0) {
                     ForEach(pane.tabs) { tab in
-                        HStack(spacing: 7) {
-                            Image(systemName: "folder.fill").foregroundStyle(.tint).font(.system(size: 12))
-                            Text(tab.url.path == "/" ? "Macintosh HD" : tab.url.lastPathComponent).lineLimit(1).font(.system(size: 11))
-                            if pane.tabs.count > 1 { Button { pane.closeTab(tab.id) } label: { Image(systemName: "xmark").font(.system(size: 9)) }.buttonStyle(.plain).help("Close Tab") }
-                        }.padding(.horizontal, 11).frame(height: 31)
+                        HStack(spacing: 0) {
+                            Button { workspace.activate(pane); pane.selectTab(tab.id) } label: {
+                                HStack(spacing: 7) {
+                                    Image(systemName: "folder.fill").foregroundStyle(.tint).font(.system(size: 12))
+                                    Text(tab.url.path == "/" ? "Macintosh HD" : tab.url.lastPathComponent).lineLimit(1).truncationMode(.middle).font(.system(size: 12))
+                                }.padding(.horizontal, 10).frame(minWidth: 90, maxWidth: 200, minHeight: 34, alignment: .leading).contentShape(Rectangle())
+                            }.buttonStyle(.plain).foregroundStyle(.primary)
+                                .accessibilityAddTraits(tab.id == pane.activeTab ? .isSelected : [])
+                            if pane.tabs.count > 1 {
+                                Button { workspace.activate(pane); pane.closeTab(tab.id) } label: {
+                                    Image(systemName: "xmark").font(.system(size: 10)).frame(width: 26, height: 30).contentShape(Rectangle())
+                                }.buttonStyle(.plain).help("Close Tab").accessibilityLabel("Close \(tab.url.lastPathComponent) tab")
+                            }
+                        }.help(tab.url.path)
                             .background(tab.id == pane.activeTab ? Color(nsColor: .textBackgroundColor) : Color.clear)
                             .overlay(alignment: .top) { if tab.id == pane.activeTab && workspace.activeID == pane.id { Rectangle().fill(Color.accentColor).frame(height: 2) } }
-                            .contentShape(Rectangle()).onTapGesture { workspace.activate(pane); pane.selectTab(tab.id) }
                             .contextMenu { Button("Close Tab") { pane.closeTab(tab.id) }; Button("Move Tab to New Pane") { workspace.activate(pane); pane.selectTab(tab.id); workspace.split(vertical: true, moveTab: true) } }
                     }
                 }
             }
-            Button { workspace.activate(pane); pane.newTab() } label: { Image(systemName: "plus") }.help("New Pane Tab")
-            Button { workspace.activate(pane); workspace.split(vertical: true) } label: { Image(systemName: "rectangle.split.2x1") }.help("Split Right")
-            Button { workspace.activate(pane); workspace.split(vertical: false) } label: { Image(systemName: "rectangle.split.1x2") }.help("Split Down")
+            Button { workspace.activate(pane); pane.newTab() } label: { Image(systemName: "plus").frame(width: 28, height: 28).contentShape(Rectangle()) }.help("New Pane Tab").accessibilityLabel("New Pane Tab")
+            Button { workspace.activate(pane); workspace.split(vertical: true) } label: { Image(systemName: "rectangle.split.2x1").frame(width: 28, height: 28).contentShape(Rectangle()) }.help("Split Right").accessibilityLabel("Split Right")
+            Button { workspace.activate(pane); workspace.split(vertical: false) } label: { Image(systemName: "rectangle.split.1x2").frame(width: 28, height: 28).contentShape(Rectangle()) }.help("Split Down").accessibilityLabel("Split Down")
         }.buttonStyle(.plain).foregroundStyle(.secondary).padding(.trailing, 9).background(Color(nsColor: .controlBackgroundColor))
     }
     var statusText: String {
@@ -179,15 +195,22 @@ struct PaneView: View {
     }
     var availableSpace: String { if let value = try? pane.url.resourceValues(forKeys: [.volumeAvailableCapacityKey]).volumeAvailableCapacity { return ByteCountFormatter.string(fromByteCount: Int64(value), countStyle: .file) + " available" }; return "" }
     var breadcrumbs: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 7) {
-                ForEach(Array(ancestors.enumerated()), id: \.offset) { index, url in
-                    Button { workspace.activate(pane); pane.navigate(url) } label: {
-                        HStack(spacing: 4) { if index == 0 { Image(systemName: "internaldrive") }; Text(url.path == "/" ? "Macintosh HD" : url.lastPathComponent) }.font(.system(size: 10, weight: index == ancestors.count - 1 ? .medium : .regular))
-                    }.buttonStyle(.plain).foregroundStyle(index == ancestors.count - 1 ? Color.primary : Color.secondary)
-                    if index < ancestors.count - 1 { Image(systemName: "chevron.right").font(.system(size: 8)).foregroundStyle(.tertiary) }
+        ScrollViewReader { proxy in
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 2) {
+                    ForEach(Array(ancestors.enumerated()), id: \.offset) { index, url in
+                        Button { workspace.activate(pane); pane.navigate(url) } label: {
+                            HStack(spacing: 5) { if index == 0 { Image(systemName: "internaldrive") }; Text(url.path == "/" ? "Macintosh HD" : url.lastPathComponent) }
+                                .font(.system(size: 11, weight: index == ancestors.count - 1 ? .semibold : .regular))
+                                .padding(.horizontal, 6).frame(height: 28).contentShape(Rectangle())
+                        }.buttonStyle(.plain).foregroundStyle(index == ancestors.count - 1 ? Color.primary : Color.secondary).help(url.path).id(url.path)
+                        if index < ancestors.count - 1 { Image(systemName: "chevron.right").font(.system(size: 8)).foregroundStyle(.tertiary).accessibilityHidden(true) }
+                    }
                 }
-            }.padding(.horizontal, 12).frame(height: 30)
+                .padding(.horizontal, 6).frame(height: 34)
+            }
+            .onAppear { proxy.scrollTo(pane.url.path, anchor: .trailing) }
+            .onChange(of: pane.url) { _, url in proxy.scrollTo(url.path, anchor: .trailing) }
         }
     }
     var ancestors: [URL] {
@@ -196,16 +219,28 @@ struct PaneView: View {
         result.insert(URL(fileURLWithPath: "/"), at: 0); return result
     }
     @ViewBuilder var content: some View {
-        if pane.shown.isEmpty && !pane.loading && !pane.search.isSearching {
-            VStack(spacing: 10) {
-                Image(systemName: pane.query.isEmpty ? "folder" : "magnifyingglass").font(.system(size: 34, weight: .light)).foregroundStyle(.tertiary)
-                Text(pane.query.isEmpty ? "This folder is empty" : "No matching files").font(.headline)
-                if pane.query.isEmpty {
+        if let emptyState = pane.emptyState {
+            VStack(spacing: 12) {
+                Image(systemName: emptyState.symbol).font(.system(size: 34, weight: .light)).foregroundStyle(.secondary).accessibilityHidden(true)
+                Text(emptyState.rawValue).font(.headline)
+                switch emptyState {
+                case .folder:
                     Button("Create New Folder…") { workspace.activate(pane); workspace.newFolder() }
-                } else {
-                    Text("Try fewer filters or choose another folder.").font(.caption).foregroundStyle(.secondary)
+                case .filtered:
+                    Text("No names match “\(pane.filter)”.").font(.callout).foregroundStyle(.secondary).lineLimit(3)
+                    Button("Clear Filter") { workspace.activate(pane); pane.filter = "" }
+                case .search, .searchNeedsAttention:
+                    Text(emptyState == .searchNeedsAttention ? "Review the search warnings above, then try again or clear the search." : "Try fewer search terms or return to this folder.").font(.callout).foregroundStyle(.secondary)
+                    if emptyState == .searchNeedsAttention { Button("Retry Search") { workspace.activate(pane); pane.runSearch() } }
+                    Button("Clear Search") { workspace.activate(pane); pane.query = "" }
+                case .unavailable:
+                    Text(pane.error).font(.callout).foregroundStyle(.secondary).textSelection(.enabled)
+                    Button("Retry") { workspace.activate(pane); pane.load() }
                 }
-            }.frame(maxWidth: .infinity, maxHeight: .infinity)
+            }.multilineTextAlignment(.center).frame(maxWidth: 360).padding(24).frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else if pane.shown.isEmpty && (pane.loading || pane.search.isSearching) {
+            ProgressView(pane.query.isEmpty ? "Loading folder…" : "Searching…").controlSize(.small).font(.callout)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
             switch pane.mode {
             case .list: list
@@ -250,11 +285,12 @@ struct PaneView: View {
                 ForEach(groups, id: \.name) { group in
                     Section {
                         ForEach(group.entries) { item in
-                            VStack(spacing: 6) { FileIcon(url: item.url, size: preferences.iconSize); HStack(spacing: 4) { TagDots(tags: item.tags, colors: item.tagColors); Text(item.name).font(.system(size: 11)).lineLimit(2).multilineTextAlignment(.center) }; cloud(item) }
+                            VStack(spacing: 6) { FileIcon(url: item.url, size: preferences.iconSize); HStack(spacing: 4) { TagDots(tags: item.tags, colors: item.tagColors); Text(item.name).font(.system(size: 12)).lineLimit(2).multilineTextAlignment(.center) }; cloud(item) }
                                 .padding(8).frame(maxWidth: .infinity).frame(height: preferences.iconSize + 65, alignment: .top)
                                 .background(pane.selection.contains(item.id) ? Color.accentColor.opacity(0.18) : .clear, in: RoundedRectangle(cornerRadius: 7))
                                 .contentShape(Rectangle()).onTapGesture(count: 2) { workspace.activate(pane); workspace.open([item.url]) }
                                 .onTapGesture { workspace.activate(pane); workspace.select(item) }
+                                .help(item.url.path)
                                 .contextMenu { FileContextMenu(workspace: workspace, pane: pane, entry: item) }.onDrag { drag(item) }
                                 .onDrop(of: [.fileURL], isTargeted: nil) { item.isDirectory && acceptDrop($0, destination: item.url) }
                         }
@@ -275,10 +311,11 @@ struct PaneView: View {
                     ScrollView {
                         LazyVStack(spacing: 1) {
                             ForEach(pane.sorted(index == 0 && !pane.query.isEmpty ? pane.shown : entries)) { item in
-                                HStack(spacing: 6) { FileIcon(url: item.url, size: 17); Text(item.name).font(.system(size: 11)).lineLimit(1); Spacer(); cloud(item); if item.isDirectory { Image(systemName: "chevron.right").font(.system(size: 9)).foregroundStyle(.secondary) } }
-                                    .padding(.horizontal, 7).frame(height: 25).background(pane.selection.contains(item.id) || pane.columnFolders.contains(item.url) ? Color.accentColor.opacity(0.16) : .clear, in: RoundedRectangle(cornerRadius: 5))
+                                HStack(spacing: 6) { FileIcon(url: item.url, size: 17); Text(item.name).font(.system(size: 12)).lineLimit(1); Spacer(); cloud(item); if item.isDirectory { Image(systemName: "chevron.right").font(.system(size: 9)).foregroundStyle(.secondary) } }
+                                    .padding(.horizontal, 7).frame(height: 28).background(pane.selection.contains(item.id) || pane.columnFolders.contains(item.url) ? Color.accentColor.opacity(0.16) : .clear, in: RoundedRectangle(cornerRadius: 5))
                                     .contentShape(Rectangle()).onTapGesture(count: 2) { workspace.activate(pane); workspace.open([item.url]) }
                                     .onTapGesture { workspace.activate(pane); pane.chooseColumn(item, at: index) }
+                                    .help(item.url.path)
                                     .contextMenu { FileContextMenu(workspace: workspace, pane: pane, entry: item) }.onDrag { drag(item) }
                             }
                         }.padding(6)
@@ -296,7 +333,7 @@ struct PaneView: View {
             ScrollView(.horizontal) {
                 HStack(spacing: 12) {
                     ForEach(pane.shown) { item in
-                        VStack { FileIcon(url: item.url, size: 64); Text(item.name).font(.system(size: 10)).lineLimit(1) }.padding(7).frame(width: 95).background(pane.selection.contains(item.id) ? Color.accentColor.opacity(0.16) : .clear, in: RoundedRectangle(cornerRadius: 6)).onTapGesture(count: 2) { workspace.activate(pane); workspace.open([item.url]) }.onTapGesture { workspace.activate(pane); workspace.select(item) }.contextMenu { FileContextMenu(workspace: workspace, pane: pane, entry: item) }.onDrag { drag(item) }
+                        VStack { FileIcon(url: item.url, size: 64); Text(item.name).font(.system(size: 11)).lineLimit(1) }.padding(7).frame(width: 95).background(pane.selection.contains(item.id) ? Color.accentColor.opacity(0.16) : .clear, in: RoundedRectangle(cornerRadius: 6)).contentShape(Rectangle()).onTapGesture(count: 2) { workspace.activate(pane); workspace.open([item.url]) }.onTapGesture { workspace.activate(pane); workspace.select(item) }.help(item.url.path).contextMenu { FileContextMenu(workspace: workspace, pane: pane, entry: item) }.onDrag { drag(item) }
                     }
                 }.padding(10)
             }.frame(height: 115)

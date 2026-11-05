@@ -42,6 +42,7 @@ import Combine
                 do {
                     try BrowserSelfCheck.run()
                     try await BrowserSelfCheck.columns()
+                    try await BrowserSelfCheck.searchFeedback()
                     try await NaturalQuery.selfCheck()
                     try FolderComparison.selfCheck()
                     try BatchRenamePlan.selfCheck()
