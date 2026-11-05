@@ -72,7 +72,7 @@ struct SidebarView: View {
 }
 struct SidebarButtonStyle: ButtonStyle {
     let selected: Bool
-    func makeBody(configuration: Configuration) -> some View { configuration.label.font(.system(size: 12)).padding(.horizontal, 8).padding(.vertical, 7).background(selected ? Color.primary.opacity(0.09) : configuration.isPressed ? Color.primary.opacity(0.05) : .clear, in: RoundedRectangle(cornerRadius: 6)) }
+    func makeBody(configuration: Configuration) -> some View { configuration.label.font(.system(size: 12)).padding(.horizontal, 8).padding(.vertical, 7).contentShape(Rectangle()).background(selected ? Color.primary.opacity(0.09) : configuration.isPressed ? Color.primary.opacity(0.05) : .clear, in: RoundedRectangle(cornerRadius: 6)) }
 }
 
 struct ShelfView: View {
