@@ -563,7 +563,8 @@ struct FilePreview: View {
     var body: some View {
         if let entry {
             VStack(alignment: .leading, spacing: 10) {
-                if compact { QuickPreview(url: entry.url).frame(height: 240) } else { QuickPreview(url: entry.url).frame(minHeight: 100, maxHeight: .infinity) }
+                // Narrow panels get a fit-to-box thumbnail like Finder; a live QLPreviewView shows documents at 100% zoom, cropped.
+                if compact { FileIcon(url: entry.url, size: 240).frame(maxWidth: .infinity) } else { QuickPreview(url: entry.url).frame(minHeight: 100, maxHeight: .infinity) }
                 Text(entry.name).font(.headline).textSelection(.enabled)
                 Text(entry.kind + (entry.isDirectory ? "" : " · " + ByteCountFormatter.string(fromByteCount: entry.size, countStyle: .file))).foregroundStyle(.secondary)
                 Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 7) {
