@@ -562,21 +562,29 @@ struct FilePreview: View {
     var compact = false
     var body: some View {
         if let entry {
-            VStack(alignment: .leading, spacing: 10) {
+            VStack(spacing: 12) {
                 // Narrow panels get a fit-to-box thumbnail like Finder; a live QLPreviewView shows documents at 100% zoom, cropped.
-                if compact { FileIcon(url: entry.url, size: 240).frame(maxWidth: .infinity) } else { QuickPreview(url: entry.url).frame(minHeight: 100, maxHeight: .infinity) }
-                Text(entry.name).font(.headline).textSelection(.enabled)
-                Text(entry.kind + (entry.isDirectory ? "" : " · " + ByteCountFormatter.string(fromByteCount: entry.size, countStyle: .file))).foregroundStyle(.secondary)
-                Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 7) {
-                    GridRow { Text("Modified").foregroundStyle(.secondary); Text(entry.modified.formatted(date: .abbreviated, time: .shortened)) }
-                    GridRow { Text("Created").foregroundStyle(.secondary); Text(entry.created.formatted(date: .abbreviated, time: .shortened)) }
-                    if !entry.tags.isEmpty { GridRow { Text("Tags").foregroundStyle(.secondary); Text(entry.tags.joined(separator: ", ")) } }
-                    if !entry.cloudStatus.isEmpty { GridRow { Text("Status").foregroundStyle(.secondary); Text(entry.cloudStatus) } }
-                }.font(.system(size: 10))
+                if compact { FileIcon(url: entry.url, size: 200).shadow(color: .black.opacity(0.25), radius: 5, y: 2).padding(.top, 8) }
+                else { QuickPreview(url: entry.url).frame(minHeight: 100, maxHeight: .infinity) }
+                VStack(spacing: 3) {
+                    Text(entry.name).font(.system(size: 13, weight: .semibold)).lineLimit(3).textSelection(.enabled)
+                    Text(entry.kind + (entry.isDirectory ? "" : " · " + ByteCountFormatter.string(fromByteCount: entry.size, countStyle: .file))).font(.system(size: 11)).foregroundStyle(.secondary)
+                }.multilineTextAlignment(.center)
+                Divider()
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Information").fontWeight(.semibold)
+                    infoRow("Created", entry.created.formatted(date: .abbreviated, time: .shortened))
+                    infoRow("Modified", entry.modified.formatted(date: .abbreviated, time: .shortened))
+                    if !entry.tags.isEmpty { infoRow("Tags", entry.tags.joined(separator: ", ")) }
+                    if !entry.cloudStatus.isEmpty { infoRow("Status", entry.cloudStatus) }
+                }.font(.system(size: 11))
                 if compact { Spacer(minLength: 0) }
             }.padding(16)
         } else { Text("Select a file to preview").foregroundStyle(.secondary).frame(maxWidth: .infinity, maxHeight: .infinity) }
     }
+}
+private func infoRow(_ label: String, _ value: String) -> some View {
+    HStack(alignment: .firstTextBaseline) { Text(label).foregroundStyle(.secondary); Spacer(minLength: 8); Text(value).multilineTextAlignment(.trailing).textSelection(.enabled) }
 }
 struct PreviewWindow: View {
     let urls: [URL]
