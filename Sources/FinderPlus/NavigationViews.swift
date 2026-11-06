@@ -72,9 +72,20 @@ struct SidebarView: View {
         }
     }
 }
+/// Shared sidebar/browser row look: accent fill when selected, faint fill on hover or press.
+struct RowHighlight: ViewModifier {
+    let selected: Bool
+    var pressed = false
+    var cornerRadius: CGFloat = 6
+    @State private var hovered = false
+    func body(content: Content) -> some View {
+        content
+            .background(selected ? Color.accentColor.opacity(pressed ? 0.25 : 0.16) : Color.primary.opacity(pressed ? 0.10 : hovered ? 0.05 : 0), in: RoundedRectangle(cornerRadius: cornerRadius))
+            .onHover { hovered = $0 }
+    }
+}
 struct SidebarButtonStyle: ButtonStyle {
     let selected: Bool
-    @State private var hovered = false
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .labelStyle(SidebarLabelStyle())
@@ -82,8 +93,7 @@ struct SidebarButtonStyle: ButtonStyle {
             .foregroundStyle(.primary)
             .padding(.horizontal, 8).padding(.vertical, 6).frame(minHeight: 32)
             .contentShape(Rectangle())
-            .background(selected ? Color.accentColor.opacity(configuration.isPressed ? 0.25 : 0.16) : Color.primary.opacity(configuration.isPressed ? 0.10 : hovered ? 0.05 : 0), in: RoundedRectangle(cornerRadius: 6))
-            .onHover { hovered = $0 }
+            .modifier(RowHighlight(selected: selected, pressed: configuration.isPressed))
             .accessibilityAddTraits(selected ? .isSelected : [])
     }
 }

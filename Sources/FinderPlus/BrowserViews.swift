@@ -112,6 +112,8 @@ struct PaneView: View {
     @ObservedObject var preferences = AppPreferences.shared
     @FocusState private var filterFocused: Bool
     @State private var showFilter = false
+    @State private var columnWidths: [Int: CGFloat] = [:]
+    @State private var dragStartWidth: CGFloat?
     var body: some View {
         VStack(spacing: 0) {
             if pane.tabs.count > 1 || workspace.panes.count > 1 { tabStrip; Divider() }
@@ -300,7 +302,7 @@ struct PaneView: View {
                             ForEach(group.entries) { item in
                                 VStack(spacing: 6) { FileIcon(url: item.url, size: preferences.iconSize); HStack(spacing: 4) { TagDots(tags: item.tags, colors: item.tagColors); Text(item.name).font(.system(size: 12)).lineLimit(2).multilineTextAlignment(.center) }; cloud(item) }
                                     .padding(8).frame(maxWidth: .infinity).frame(height: preferences.iconSize + 65, alignment: .top)
-                                    .background(pane.selection.contains(item.id) ? Color.accentColor.opacity(0.18) : .clear, in: RoundedRectangle(cornerRadius: 7))
+                                    .modifier(RowHighlight(selected: pane.selection.contains(item.id), cornerRadius: 7))
                                     .contentShape(Rectangle()).onTapGesture(count: 2) { focusFiles(); workspace.open([item.url]) }
                                     .onTapGesture { focusFiles(); workspace.select(item) }
                                     .help(item.url.path).id(item.id)
@@ -332,8 +334,8 @@ struct PaneView: View {
                             ScrollView {
                                 LazyVStack(spacing: 1) {
                                     ForEach(pane.sorted(index == 0 && !pane.query.isEmpty ? pane.shown : entries)) { item in
-                                        HStack(spacing: 6) { FileIcon(url: item.url, size: 17); Text(item.name).font(.system(size: 12)).lineLimit(1); Spacer(); cloud(item); if item.isDirectory { Image(systemName: "chevron.right").font(.system(size: 9)).foregroundStyle(.secondary) } }
-                                            .padding(.horizontal, 7).frame(height: 28).background(pane.selection.contains(item.id) || pane.columnFolders.contains(item.url) ? Color.accentColor.opacity(0.16) : .clear, in: RoundedRectangle(cornerRadius: 5))
+                                        HStack(spacing: 6) { FileIcon(url: item.url, size: 17); Text(item.name).font(.system(size: 12, weight: pane.selection.contains(item.id) || pane.columnFolders.contains(item.url) ? .medium : .regular)).lineLimit(1); Spacer(); cloud(item); if item.isDirectory { Image(systemName: "chevron.right").font(.system(size: 9)).foregroundStyle(.secondary) } }
+                                            .padding(.horizontal, 7).frame(height: 28).modifier(RowHighlight(selected: pane.selection.contains(item.id) || pane.columnFolders.contains(item.url)))
                                             .contentShape(Rectangle()).onTapGesture(count: 2) { focusFiles(); workspace.open([item.url]) }
                                             .onTapGesture { focusFiles(); pane.chooseColumn(item, at: index) }
                                             .help(item.url.path).id(item.id)
@@ -346,8 +348,8 @@ struct PaneView: View {
                                 }.padding(6)
                             }
                             .onChange(of: pane.selectionToReveal, initial: true) { _, id in if let id { columnProxy.scrollTo(id) } }
-                        }.frame(width: 235).id(index)
-                        Divider()
+                        }.frame(width: columnWidths[index, default: 235]).id(index)
+                        columnDivider(index)
                     }
                     if let path = pane.selection.sorted().first { FilePreview(entry: try? FileEntry(url: URL(fileURLWithPath: path)), compact: true).frame(width: 280) }
                 }
@@ -355,6 +357,22 @@ struct PaneView: View {
             .onChange(of: pane.selectedColumn, initial: true) { _, column in if let column { proxy.scrollTo(column) } }
             .onChange(of: pane.columnEntries.count) { previousCount, count in if count > previousCount { proxy.scrollTo(count - 1, anchor: .trailing) } }
         }
+    }
+    /// Drag to resize the column on its left, like Finder; double-click resets it.
+    func columnDivider(_ index: Int) -> some View {
+        Divider().overlay(
+            Color.clear.frame(width: 9).contentShape(Rectangle())
+                .onHover { $0 ? NSCursor.resizeLeftRight.push() : NSCursor.pop() }
+                .onTapGesture(count: 2) { columnWidths[index] = nil }
+                // Global space: the handle moves with the column, so local translation would feed back.
+                .gesture(DragGesture(minimumDistance: 1, coordinateSpace: .global)
+                    .onChanged { drag in
+                        let start = dragStartWidth ?? columnWidths[index, default: 235]
+                        dragStartWidth = start
+                        columnWidths[index] = min(max(start + drag.translation.width, 140), 600)
+                    }
+                    .onEnded { _ in dragStartWidth = nil })
+        )
     }
     var gallery: some View {
         VStack(spacing: 0) {
@@ -364,7 +382,7 @@ struct PaneView: View {
                 ScrollView(.horizontal) {
                     HStack(spacing: 12) {
                         ForEach(pane.shown) { item in
-                            VStack { FileIcon(url: item.url, size: 64); Text(item.name).font(.system(size: 11)).lineLimit(1) }.padding(7).frame(width: 95).background(pane.selection.contains(item.id) ? Color.accentColor.opacity(0.16) : .clear, in: RoundedRectangle(cornerRadius: 6)).contentShape(Rectangle()).onTapGesture(count: 2) { focusFiles(); workspace.open([item.url]) }.onTapGesture { focusFiles(); workspace.select(item) }.help(item.url.path).id(item.id).accessibilityElement(children: .combine).accessibilityAddTraits(.isButton).accessibilityAddTraits(pane.selection.contains(item.id) ? .isSelected : []).accessibilityAction { focusFiles(); workspace.select(item) }.accessibilityAction(named: "Open") { focusFiles(); workspace.open([item.url]) }.contextMenu { FileContextMenu(workspace: workspace, pane: pane, entry: item) }.onDrag { drag(item) }
+                            VStack { FileIcon(url: item.url, size: 64); Text(item.name).font(.system(size: 11)).lineLimit(1) }.padding(7).frame(width: 95).modifier(RowHighlight(selected: pane.selection.contains(item.id))).contentShape(Rectangle()).onTapGesture(count: 2) { focusFiles(); workspace.open([item.url]) }.onTapGesture { focusFiles(); workspace.select(item) }.help(item.url.path).id(item.id).accessibilityElement(children: .combine).accessibilityAddTraits(.isButton).accessibilityAddTraits(pane.selection.contains(item.id) ? .isSelected : []).accessibilityAction { focusFiles(); workspace.select(item) }.accessibilityAction(named: "Open") { focusFiles(); workspace.open([item.url]) }.contextMenu { FileContextMenu(workspace: workspace, pane: pane, entry: item) }.onDrag { drag(item) }
                         }
                     }.padding(10)
                 }.frame(height: 115)
